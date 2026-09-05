@@ -1,0 +1,6 @@
+{
+  "name": "MEDICOS⛑️MINDS",
+  "description": "A clean, mobile-first store for medical and physiotherapy study notes and PDF downloads with instant creator upload and secure verified checkout.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
