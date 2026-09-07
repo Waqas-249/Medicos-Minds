@@ -67,7 +67,26 @@ function writeJSON<T>(file: string, data: T): void {
   }
 }
 
-// Multer storage configuration
+// Strict Email Validation Helper (RFC 5322 standard with valid domain & TLD check)
+function isValidEmail(email: string): boolean {
+  if (!email || typeof email !== "string") return false;
+  const trimmed = email.trim();
+  if (trimmed.length < 6 || trimmed.length > 254) return false;
+  // Disallow spaces
+  if (/\s/.test(trimmed)) return false;
+  // RFC 5322 compliant regex requiring local@domain.tld with at least 2 char TLD
+  const emailRegex = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$/;
+  if (!emailRegex.test(trimmed)) return false;
+  const parts = trimmed.split("@");
+  if (parts.length !== 2) return false;
+  const domain = parts[1];
+  if (!domain.includes(".")) return false;
+  const tld = domain.split(".").pop();
+  if (!tld || tld.length < 2 || !/^[a-zA-Z]+$/.test(tld)) return false;
+  return true;
+}
+
+// Multer storage configuration - Expanded to 3 GB maximum file size
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     if (file.fieldname === "pdf") {
@@ -86,7 +105,7 @@ const storage = multer.diskStorage({
 const upload = multer({
   storage,
   limits: {
-    fileSize: 50 * 1024 * 1024, // 50 MB max
+    fileSize: 3 * 1024 * 1024 * 1024, // 3 GB max (expanded from 1GB for ultra high-res study guides)
   },
   fileFilter: (req, file, cb) => {
     if (file.fieldname === "pdf") {
@@ -95,11 +114,16 @@ const upload = multer({
       } else {
         cb(new Error("Only PDF files are allowed for notes"));
       }
-    } else if (file.fieldname === "cover") {
-      if (file.mimetype.startsWith("image/") || /\.(jpg|jpeg|png|webp|svg)$/i.test(file.originalname)) {
+    } else if (
+      file.fieldname === "cover" ||
+      file.fieldname === "preview_1" ||
+      file.fieldname === "preview_2" ||
+      file.fieldname.startsWith("preview")
+    ) {
+      if (file.mimetype.startsWith("image/") || /\.(jpg|jpeg|png|webp|svg|gif)$/i.test(file.originalname)) {
         cb(null, true);
       } else {
-        cb(new Error("Only image files are allowed for note covers"));
+        cb(new Error("Only image files are allowed for note covers and previews"));
       }
     } else {
       cb(null, true);
@@ -108,11 +132,19 @@ const upload = multer({
 });
 
 // Middleware
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: "50mb" }));
+app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
-// Serve cover images publicly (covers are promotional visuals)
+// Serve cover and preview images publicly
 app.use("/api/covers", express.static(COVERS_DIR));
+app.get("/api/covers/:filename", (req, res) => {
+  const filename = path.basename(req.params.filename);
+  const filePath = path.join(COVERS_DIR, filename);
+  if (fs.existsSync(filePath)) {
+    return res.sendFile(filePath);
+  }
+  res.status(404).json({ error: "Image not found" });
+});
 
 // Simple in-memory session tokens for admin
 const adminSessions = new Set<string>();
@@ -146,11 +178,10 @@ app.get("/api/settings", (req, res) => {
     instagram_url: "https://instagram.com/restore_healthphysio",
     support_email: "restorehealthphysio@gmail.com",
     whatsapp_number: "+91 83407 49923",
-    upi_id: "restorehealthphysio@okaxis",
-    razorpay_key_id: "",
-    payment_mode: "test",
+    upi_id: "kamranalam8340749923-1@okhdfcbank",
+    payment_mode: "live",
   });
-  // Do NOT expose admin_pin or razorpay_key_secret publicly
+  // Do NOT expose admin_pin or internal secrets publicly
   const { admin_pin, razorpay_key_secret, ...publicSettings } = settings as any;
   res.json(publicSettings);
 });
@@ -181,12 +212,22 @@ app.get("/api/notes/:id", (req, res) => {
   res.json({ ...publicData, has_pdf: !!pdf_file });
 });
 
-// 5. Create checkout order
+// 5. Create checkout order (Direct UPI & QR Code payment flow with strict validation)
 app.post("/api/checkout/create-order", async (req, res) => {
   const { note_id, customer_name, customer_email, customer_phone } = req.body;
 
   if (!note_id || !customer_name || !customer_email) {
     return res.status(400).json({ error: "Missing required customer details." });
+  }
+
+  // Strict email validation
+  if (!isValidEmail(customer_email)) {
+    return res.status(400).json({ error: "Please enter a valid, deliverable email address (e.g. name@gmail.com)." });
+  }
+
+  // Name validation
+  if (customer_name.trim().length < 2) {
+    return res.status(400).json({ error: "Please enter your full name." });
   }
 
   const notes = readJSON<any[]>(NOTES_FILE, []);
@@ -197,49 +238,9 @@ app.post("/api/checkout/create-order", async (req, res) => {
 
   const settings = readJSON(SETTINGS_FILE, {}) as any;
   const orderId = "ord_" + Date.now() + "_" + Math.random().toString(36).substring(2, 7);
-  
-  const keyId = settings.razorpay_key_id || process.env.RAZORPAY_KEY_ID || "";
-  const keySecret = settings.razorpay_key_secret || process.env.RAZORPAY_KEY_SECRET || "";
-
-  let razorpayOrderId: string | null = null;
-
-  // If live or valid Razorpay credentials are configured, create order on Razorpay servers
-  if (keyId && keySecret) {
-    try {
-      const authHeader = "Basic " + Buffer.from(`${keyId}:${keySecret}`).toString("base64");
-      const rzpRes = await fetch("https://api.razorpay.com/v1/orders", {
-        method: "POST",
-        headers: {
-          "Authorization": authHeader,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          amount: Math.round(note.price * 100), // paise
-          currency: "INR",
-          receipt: orderId,
-          notes: {
-            note_title: note.title,
-            customer_email: customer_email.trim().toLowerCase(),
-            customer_name: customer_name.trim(),
-          },
-        }),
-      });
-
-      if (rzpRes.ok) {
-        const rzpData = (await rzpRes.json()) as any;
-        razorpayOrderId = rzpData.id;
-      } else {
-        const errText = await rzpRes.text();
-        console.warn("Razorpay API order creation notice:", errText);
-      }
-    } catch (err) {
-      console.error("Failed to connect to Razorpay API:", err);
-    }
-  }
 
   const newOrder: any = {
     id: orderId,
-    razorpay_order_id: razorpayOrderId,
     note_id: note.id,
     note_title: note.title,
     customer_name: customer_name.trim(),
@@ -257,14 +258,11 @@ app.post("/api/checkout/create-order", async (req, res) => {
 
   res.json({
     order_id: newOrder.id,
-    razorpay_order_id: razorpayOrderId,
     amount: newOrder.amount,
     currency: "INR",
     note_title: note.title,
     store_name: settings.name || "MEDICOS⛑️MINDS",
-    key_id: keyId,
-    upi_id: settings.upi_id || "restorehealthphysio@okaxis",
-    payment_mode: settings.payment_mode || "test",
+    upi_id: settings.upi_id || "kamranalam8340749923-1@okhdfcbank",
     whatsapp_number: settings.whatsapp_number || "+91 83407 49923",
     support_email: settings.support_email || "restorehealthphysio@gmail.com",
     instagram_handle: settings.instagram_handle || "restore_healthphysio",
@@ -272,16 +270,81 @@ app.post("/api/checkout/create-order", async (req, res) => {
   });
 });
 
-// 6. Verify Payment (Server-side verification)
+// 6. Submit UPI Payment for Admin/Creator Verification (Does NOT grant access without approval)
+app.post("/api/checkout/submit-upi-payment", (req, res) => {
+  const { order_id, transaction_ref } = req.body;
+
+  if (!order_id) {
+    return res.status(400).json({ error: "Missing order_id" });
+  }
+
+  const orders = readJSON<any[]>(ORDERS_FILE, []);
+  const orderIndex = orders.findIndex((o) => o.id === order_id);
+
+  if (orderIndex === -1) {
+    return res.status(404).json({ error: "Order not found" });
+  }
+
+  const order = orders[orderIndex];
+
+  // If already paid, preserve token
+  if (order.status === "paid") {
+    return res.json({
+      success: true,
+      status: "paid",
+      download_token: order.download_token,
+      message: "Order has already been verified and paid.",
+    });
+  }
+
+  // Set status strictly to pending_verification - NO download token issued!
+  order.status = "pending_verification";
+  order.payment_method = "upi";
+  order.payment_id = transaction_ref || `upi_${Date.now()}`;
+  order.submitted_at = new Date().toISOString();
+  order.download_token = null; // Strictly null until approved
+
+  orders[orderIndex] = order;
+  writeJSON(ORDERS_FILE, orders);
+
+  res.json({
+    success: true,
+    status: "pending_verification",
+    message: "Payment submitted. Access will be unlocked once approved by the creator.",
+    order_id: order.id,
+  });
+});
+
+// 7. Check Order Status (Polled by customer modal while awaiting verification)
+app.get("/api/orders/:id/status", (req, res) => {
+  const { id } = req.params;
+  const orders = readJSON<any[]>(ORDERS_FILE, []);
+  const order = orders.find((o) => o.id === id);
+
+  if (!order) {
+    return res.status(404).json({ error: "Order not found" });
+  }
+
+  res.json({
+    order_id: order.id,
+    status: order.status,
+    download_token: order.status === "paid" ? order.download_token : null,
+    note_title: order.note_title,
+    customer_name: order.customer_name,
+    customer_email: order.customer_email,
+    amount: order.amount,
+    paid_at: order.paid_at,
+  });
+});
+
+// 8. Verify Payment (Only for automated Razorpay Gateway HMAC SHA-256 verification)
 app.post("/api/checkout/verify-payment", (req, res) => {
   const { 
     order_id, 
     payment_id, 
     razorpay_order_id,
-    signature, 
-    test_mode, 
-    payment_method, 
-    utr_number 
+    signature,
+    payment_method
   } = req.body;
 
   if (!order_id) {
@@ -299,73 +362,62 @@ app.post("/api/checkout/verify-payment", (req, res) => {
   const settings = readJSON(SETTINGS_FILE, {}) as any;
   const keySecret = settings.razorpay_key_secret || process.env.RAZORPAY_KEY_SECRET;
 
-  let isVerified = false;
-  const actualMethod = payment_method || (utr_number ? "upi" : "test");
-  const actualPaymentId = payment_id || (utr_number ? `upi_${utr_number}` : `sim_${Date.now()}`);
-
-  if (actualMethod === "razorpay" && keySecret && signature && !test_mode) {
-    // Cryptographic HMAC SHA-256 verification
+  // Strict verification: only cryptographic Razorpay HMAC SHA256 is accepted for automated verification
+  if (payment_method === "razorpay" && keySecret && signature && payment_id) {
+    let isVerified = false;
     try {
       const orderIdForVerification = razorpay_order_id || order.razorpay_order_id || order_id;
       const expectedSignature = crypto
         .createHmac("sha256", keySecret)
-        .update(`${orderIdForVerification}|${actualPaymentId}`)
+        .update(`${orderIdForVerification}|${payment_id}`)
         .digest("hex");
       isVerified = expectedSignature === signature;
     } catch (e) {
       isVerified = false;
     }
-  } else if (actualMethod === "upi") {
-    // UPI payment verification: ensure UTR or transaction ID format is provided
-    if (utr_number && utr_number.trim().length >= 4) {
-      isVerified = true;
-    } else if (actualPaymentId && actualPaymentId.length >= 4) {
-      isVerified = true;
-    }
-  } else {
-    // Test / Demo / Instant verification mode
-    if (actualPaymentId && actualPaymentId.length >= 4) {
-      isVerified = true;
-    }
-  }
 
-  if (!isVerified) {
-    order.status = "failed";
+    if (!isVerified) {
+      order.status = "failed";
+      order.download_token = null;
+      writeJSON(ORDERS_FILE, orders);
+      return res.status(400).json({ success: false, message: "Payment verification failed. Invalid gateway signature." });
+    }
+
+    // Razorpay verified! Grant access
+    const downloadToken = "dl_" + crypto.randomBytes(24).toString("hex");
+    order.status = "paid";
+    order.payment_id = payment_id;
+    order.payment_method = "razorpay";
+    order.download_token = downloadToken;
+    order.paid_at = new Date().toISOString();
+
+    orders[orderIndex] = order;
     writeJSON(ORDERS_FILE, orders);
-    return res.status(400).json({ success: false, message: "Payment verification failed. Please check details." });
+
+    return res.json({
+      success: true,
+      message: "Payment verified successfully!",
+      download_token: downloadToken,
+      order: {
+        id: order.id,
+        note_id: order.note_id,
+        note_title: order.note_title,
+        customer_name: order.customer_name,
+        customer_email: order.customer_email,
+        amount: order.amount,
+        status: order.status,
+        payment_method: order.payment_method,
+        payment_id: order.payment_id,
+        download_token: order.download_token,
+        paid_at: order.paid_at,
+      },
+    });
   }
 
-  // Payment verified! Generate cryptographically protected token for file retrieval
-  const downloadToken = "dl_" + crypto.randomBytes(24).toString("hex");
-
-  order.status = "paid";
-  order.payment_id = actualPaymentId;
-  order.payment_method = actualMethod;
-  if (utr_number) order.utr_number = utr_number.trim();
-  order.download_token = downloadToken;
-  order.paid_at = new Date().toISOString();
-
-  orders[orderIndex] = order;
-  writeJSON(ORDERS_FILE, orders);
-
-  res.json({
-    success: true,
-    message: "Payment verified successfully!",
-    download_token: downloadToken,
-    order: {
-      id: order.id,
-      note_id: order.note_id,
-      note_title: order.note_title,
-      customer_name: order.customer_name,
-      customer_email: order.customer_email,
-      amount: order.amount,
-      status: order.status,
-      payment_method: order.payment_method,
-      payment_id: order.payment_id,
-      utr_number: order.utr_number,
-      download_token: order.download_token,
-      paid_at: order.paid_at,
-    },
+  // Any unverified or uncredentialed attempts are strictly denied
+  return res.status(400).json({
+    success: false,
+    message: "Automated verification requires valid Razorpay payment gateway credentials. For UPI payments, please submit confirmation for creator verification.",
   });
 });
 
@@ -452,8 +504,8 @@ app.get("/api/view/:token", (req, res) => {
 app.get("/api/purchases/lookup", (req, res) => {
   const email = (req.query.email as string || "").trim().toLowerCase();
 
-  if (!email || !email.includes("@")) {
-    return res.status(400).json({ error: "Please provide a valid email address." });
+  if (!email || !isValidEmail(email)) {
+    return res.status(400).json({ error: "Please enter a valid email address (e.g. name@gmail.com)." });
   }
 
   const orders = readJSON<any[]>(ORDERS_FILE, []);
@@ -489,11 +541,12 @@ app.get("/api/purchases/lookup", (req, res) => {
 // Admin Login
 app.post("/api/admin/login", (req, res) => {
   const { pin } = req.body;
-  const settings = readJSON(SETTINGS_FILE, { admin_pin: "1234" }) as any;
-  const expectedPin = settings.admin_pin || process.env.ADMIN_PASSWORD || "1234";
+  const settings = readJSON(SETTINGS_FILE, {}) as any;
+  // Dynamic priority: settings.admin_pin configured by user ALWAYS takes precedence
+  const expectedPin = (settings.admin_pin && settings.admin_pin.toString().trim()) || process.env.ADMIN_PASSWORD || "1234";
 
   if (!pin || pin.toString().trim() !== expectedPin.toString().trim()) {
-    return res.status(401).json({ error: "Invalid Admin PIN / Password." });
+    return res.status(401).json({ error: "Invalid Admin PIN / Password. Please check and try again." });
   }
 
   const sessionToken = "adm_" + crypto.randomBytes(24).toString("hex");
@@ -534,6 +587,8 @@ app.post(
   upload.fields([
     { name: "pdf", maxCount: 1 },
     { name: "cover", maxCount: 1 },
+    { name: "preview_1", maxCount: 1 },
+    { name: "preview_2", maxCount: 1 },
   ]),
   (req: any, res: any) => {
     try {
@@ -546,9 +601,19 @@ app.post(
       const files = req.files as { [fieldname: string]: Express.Multer.File[] } | undefined;
       const pdfFile = files?.pdf?.[0];
       const coverFile = files?.cover?.[0];
+      const preview1File = files?.preview_1?.[0];
+      const preview2File = files?.preview_2?.[0];
 
       if (!pdfFile) {
         return res.status(400).json({ error: "Please upload a PDF file for this note." });
+      }
+
+      const previewImages: string[] = [];
+      if (preview1File) {
+        previewImages.push(`/api/covers/${preview1File.filename}`);
+      }
+      if (preview2File) {
+        previewImages.push(`/api/covers/${preview2File.filename}`);
       }
 
       const noteId = "note_" + Date.now();
@@ -558,6 +623,7 @@ app.post(
         description: (description || "").trim(),
         price: Math.max(0, Number(price) || 0),
         cover_image: coverFile ? `/api/covers/${coverFile.filename}` : "",
+        preview_images: previewImages,
         pdf_file: pdfFile.filename,
         pdf_original_name: pdfFile.originalname,
         pdf_size: pdfFile.size,
@@ -585,11 +651,21 @@ app.put(
   upload.fields([
     { name: "pdf", maxCount: 1 },
     { name: "cover", maxCount: 1 },
+    { name: "preview_1", maxCount: 1 },
+    { name: "preview_2", maxCount: 1 },
   ]),
   (req: any, res: any) => {
     try {
       const { id } = req.params;
-      const { title, description, price, published } = req.body;
+      const { 
+        title, 
+        description, 
+        price, 
+        published,
+        remove_cover,
+        remove_preview_1,
+        remove_preview_2,
+      } = req.body;
 
       const notes = readJSON<any[]>(NOTES_FILE, []);
       const index = notes.findIndex((n) => n.id === id);
@@ -602,6 +678,8 @@ app.put(
       const files = req.files as { [fieldname: string]: Express.Multer.File[] } | undefined;
       const pdfFile = files?.pdf?.[0];
       const coverFile = files?.cover?.[0];
+      const preview1File = files?.preview_1?.[0];
+      const preview2File = files?.preview_2?.[0];
 
       // If new PDF uploaded, delete old PDF file
       let newPdfFilename = existingNote.pdf_file;
@@ -623,7 +701,7 @@ app.put(
       }
 
       // If new cover uploaded, delete old cover file
-      let newCoverUrl = existingNote.cover_image;
+      let newCoverUrl = existingNote.cover_image || "";
       if (coverFile) {
         if (existingNote.cover_image && existingNote.cover_image.startsWith("/api/covers/")) {
           const oldCoverFilename = existingNote.cover_image.replace("/api/covers/", "");
@@ -635,7 +713,61 @@ app.put(
           }
         }
         newCoverUrl = `/api/covers/${coverFile.filename}`;
+      } else if (remove_cover === "true") {
+        if (existingNote.cover_image && existingNote.cover_image.startsWith("/api/covers/")) {
+          const oldCoverFilename = existingNote.cover_image.replace("/api/covers/", "");
+          const oldCoverPath = path.join(COVERS_DIR, oldCoverFilename);
+          if (fs.existsSync(oldCoverPath)) {
+            try {
+              fs.unlinkSync(oldCoverPath);
+            } catch (e) {}
+          }
+        }
+        newCoverUrl = "";
       }
+
+      // Handle preview images (up to 2 preview images)
+      const existingPreviews: string[] = Array.isArray(existingNote.preview_images) ? [...existingNote.preview_images] : [];
+      let prev1 = existingPreviews[0] || "";
+      let prev2 = existingPreviews[1] || "";
+
+      if (preview1File) {
+        if (prev1 && prev1.startsWith("/api/covers/")) {
+          const oldPath = path.join(COVERS_DIR, prev1.replace("/api/covers/", ""));
+          if (fs.existsSync(oldPath)) {
+            try { fs.unlinkSync(oldPath); } catch (e) {}
+          }
+        }
+        prev1 = `/api/covers/${preview1File.filename}`;
+      } else if (remove_preview_1 === "true") {
+        if (prev1 && prev1.startsWith("/api/covers/")) {
+          const oldPath = path.join(COVERS_DIR, prev1.replace("/api/covers/", ""));
+          if (fs.existsSync(oldPath)) {
+            try { fs.unlinkSync(oldPath); } catch (e) {}
+          }
+        }
+        prev1 = "";
+      }
+
+      if (preview2File) {
+        if (prev2 && prev2.startsWith("/api/covers/")) {
+          const oldPath = path.join(COVERS_DIR, prev2.replace("/api/covers/", ""));
+          if (fs.existsSync(oldPath)) {
+            try { fs.unlinkSync(oldPath); } catch (e) {}
+          }
+        }
+        prev2 = `/api/covers/${preview2File.filename}`;
+      } else if (remove_preview_2 === "true") {
+        if (prev2 && prev2.startsWith("/api/covers/")) {
+          const oldPath = path.join(COVERS_DIR, prev2.replace("/api/covers/", ""));
+          if (fs.existsSync(oldPath)) {
+            try { fs.unlinkSync(oldPath); } catch (e) {}
+          }
+        }
+        prev2 = "";
+      }
+
+      const updatedPreviews = [prev1, prev2].filter(Boolean);
 
       const updatedNote = {
         ...existingNote,
@@ -644,6 +776,7 @@ app.put(
         price: price !== undefined ? Math.max(0, Number(price)) : existingNote.price,
         published: published !== undefined ? published === "true" || published === true : existingNote.published,
         cover_image: newCoverUrl,
+        preview_images: updatedPreviews,
         pdf_file: newPdfFilename,
         pdf_original_name: newPdfOriginalName,
         pdf_size: newPdfSize,
@@ -674,7 +807,7 @@ app.delete("/api/admin/notes/:id", requireAdmin, (req, res) => {
   const [deletedNote] = notes.splice(index, 1);
   writeJSON(NOTES_FILE, notes);
 
-  // Clean up files
+  // Clean up PDF file
   if (deletedNote.pdf_file) {
     const pdfPath = path.join(PRIVATE_PDFS_DIR, deletedNote.pdf_file);
     if (fs.existsSync(pdfPath)) {
@@ -683,6 +816,8 @@ app.delete("/api/admin/notes/:id", requireAdmin, (req, res) => {
       } catch (e) {}
     }
   }
+
+  // Clean up cover image
   if (deletedNote.cover_image && deletedNote.cover_image.startsWith("/api/covers/")) {
     const coverFilename = deletedNote.cover_image.replace("/api/covers/", "");
     const coverPath = path.join(COVERS_DIR, coverFilename);
@@ -690,6 +825,21 @@ app.delete("/api/admin/notes/:id", requireAdmin, (req, res) => {
       try {
         fs.unlinkSync(coverPath);
       } catch (e) {}
+    }
+  }
+
+  // Clean up preview images
+  if (Array.isArray(deletedNote.preview_images)) {
+    for (const previewUrl of deletedNote.preview_images) {
+      if (previewUrl && previewUrl.startsWith("/api/covers/")) {
+        const previewFilename = previewUrl.replace("/api/covers/", "");
+        const previewPath = path.join(COVERS_DIR, previewFilename);
+        if (fs.existsSync(previewPath)) {
+          try {
+            fs.unlinkSync(previewPath);
+          } catch (e) {}
+        }
+      }
     }
   }
 
@@ -702,13 +852,94 @@ app.get("/api/admin/orders", requireAdmin, (req, res) => {
   res.json(orders.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()));
 });
 
+// Admin: Approve Order (Marks as paid and generates download token)
+app.post("/api/admin/orders/:id/approve", requireAdmin, (req, res) => {
+  const { id } = req.params;
+  const orders = readJSON<any[]>(ORDERS_FILE, []);
+  const orderIndex = orders.findIndex((o) => o.id === id);
+
+  if (orderIndex === -1) {
+    return res.status(404).json({ error: "Order not found" });
+  }
+
+  const order = orders[orderIndex];
+  const downloadToken = "dl_" + crypto.randomBytes(24).toString("hex");
+
+  order.status = "paid";
+  order.download_token = downloadToken;
+  order.paid_at = new Date().toISOString();
+  order.approved_by = "admin";
+
+  orders[orderIndex] = order;
+  writeJSON(ORDERS_FILE, orders);
+
+  res.json({
+    success: true,
+    message: "Order approved successfully! Student now has access to the PDF.",
+    order,
+  });
+});
+
+// Admin: Reject Order (Denies or cancels access)
+app.post("/api/admin/orders/:id/reject", requireAdmin, (req, res) => {
+  const { id } = req.params;
+  const orders = readJSON<any[]>(ORDERS_FILE, []);
+  const orderIndex = orders.findIndex((o) => o.id === id);
+
+  if (orderIndex === -1) {
+    return res.status(404).json({ error: "Order not found" });
+  }
+
+  const order = orders[orderIndex];
+  order.status = "rejected";
+  order.download_token = null;
+  order.rejected_at = new Date().toISOString();
+
+  orders[orderIndex] = order;
+  writeJSON(ORDERS_FILE, orders);
+
+  res.json({
+    success: true,
+    message: "Order rejected. Access denied.",
+    order,
+  });
+});
+
+// Admin: Delete an Order (Deletes a single order/sales record)
+app.delete("/api/admin/orders/:id", requireAdmin, (req, res) => {
+  const { id } = req.params;
+  const orders = readJSON<any[]>(ORDERS_FILE, []);
+  const initialLength = orders.length;
+  const updatedOrders = orders.filter((o) => o.id !== id);
+
+  if (updatedOrders.length === initialLength) {
+    return res.status(404).json({ error: "Order not found" });
+  }
+
+  writeJSON(ORDERS_FILE, updatedOrders);
+
+  res.json({
+    success: true,
+    message: "Order record deleted successfully",
+  });
+});
+
+// Admin: Clear All Sales History (Deletes all order records)
+app.delete("/api/admin/orders", requireAdmin, (req, res) => {
+  writeJSON(ORDERS_FILE, []);
+  res.json({
+    success: true,
+    message: "All sales history cleared successfully",
+  });
+});
+
 // Admin: Get Settings
 app.get("/api/admin/settings", requireAdmin, (req, res) => {
   const settings = readJSON(SETTINGS_FILE, {});
   res.json(settings);
 });
 
-// Admin: Update Settings
+// Admin: Update Settings (Stores UPI ID permanently and retains custom security PIN)
 app.put("/api/admin/settings", requireAdmin, (req, res) => {
   const { 
     name, 
@@ -718,13 +949,22 @@ app.put("/api/admin/settings", requireAdmin, (req, res) => {
     support_email, 
     whatsapp_number,
     upi_id,
-    razorpay_key_id,
-    razorpay_key_secret,
-    payment_mode,
     admin_pin 
   } = req.body;
   
   const currentSettings = readJSON(SETTINGS_FILE, {}) as any;
+
+  // Preserve UPI ID permanently - never revert to any hardcoded fallback
+  let cleanUpiId = currentSettings.upi_id || "kamranalam8340749923-1@okhdfcbank";
+  if (typeof upi_id === "string" && upi_id.trim() !== "") {
+    cleanUpiId = upi_id.trim();
+  }
+
+  // Preserve or update admin PIN
+  let cleanAdminPin = currentSettings.admin_pin || "1234";
+  if (admin_pin && typeof admin_pin === "string" && admin_pin.trim().length >= 4) {
+    cleanAdminPin = admin_pin.trim();
+  }
 
   const newSettings = {
     ...currentSettings,
@@ -734,20 +974,45 @@ app.put("/api/admin/settings", requireAdmin, (req, res) => {
     instagram_url: instagram_url !== undefined ? instagram_url.trim() : currentSettings.instagram_url || "",
     support_email: support_email !== undefined ? support_email.trim() : currentSettings.support_email || "",
     whatsapp_number: whatsapp_number !== undefined ? whatsapp_number.trim() : currentSettings.whatsapp_number || "+91 83407 49923",
-    upi_id: upi_id !== undefined ? upi_id.trim() : currentSettings.upi_id || "restorehealthphysio@okaxis",
-    razorpay_key_id: razorpay_key_id !== undefined ? razorpay_key_id.trim() : currentSettings.razorpay_key_id || "",
-    razorpay_key_secret: razorpay_key_secret !== undefined && razorpay_key_secret.trim() !== "" 
-      ? razorpay_key_secret.trim() 
-      : currentSettings.razorpay_key_secret || "",
-    payment_mode: payment_mode === "live" ? "live" : "test",
-    admin_pin: admin_pin ? admin_pin.toString().trim() : currentSettings.admin_pin || "1234",
+    upi_id: cleanUpiId,
+    payment_mode: "live",
+    admin_pin: cleanAdminPin,
   };
 
   writeJSON(SETTINGS_FILE, newSettings);
   
-  // Return settings without sensitive secret
-  const { razorpay_key_secret: _, ...safeSettings } = newSettings;
-  res.json(safeSettings);
+  // Return safe settings
+  const { admin_pin: _, razorpay_key_secret: __, ...safeSettings } = newSettings;
+  res.json({ ...safeSettings, pin_configured: cleanAdminPin !== "1234" });
+});
+
+// Admin: Dedicated Change Security PIN Endpoint (Immediate persistence & validation)
+app.post("/api/admin/change-pin", requireAdmin, (req, res) => {
+  const { new_pin, current_pin } = req.body;
+
+  if (!new_pin || typeof new_pin !== "string" || new_pin.trim().length < 4) {
+    return res.status(400).json({ error: "New security PIN must be at least 4 characters long." });
+  }
+
+  const currentSettings = readJSON(SETTINGS_FILE, {}) as any;
+  const expectedPin = (currentSettings.admin_pin && currentSettings.admin_pin.toString().trim()) || process.env.ADMIN_PASSWORD || "1234";
+
+  if (current_pin && current_pin.toString().trim() !== expectedPin.toString().trim()) {
+    return res.status(400).json({ error: "Current PIN is incorrect. Please enter your existing PIN." });
+  }
+
+  const cleanPin = new_pin.trim();
+  const updatedSettings = {
+    ...currentSettings,
+    admin_pin: cleanPin,
+  };
+
+  writeJSON(SETTINGS_FILE, updatedSettings);
+
+  res.json({
+    success: true,
+    message: "Security PIN successfully updated! Your store is now protected with your custom PIN.",
+  });
 });
 
 // ----------------------------------------------------

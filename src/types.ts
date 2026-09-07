@@ -3,7 +3,8 @@ export interface Note {
   title: string;
   description: string;
   price: number; // In INR (₹)
-  cover_image: string; // URL / API endpoint
+  cover_image: string; // URL / API endpoint (Main 16:9 thumbnail)
+  preview_images?: string[]; // Up to 2 inside-page preview images (16:9)
   pdf_file: string; // Internal filename
   pdf_original_name: string;
   pdf_size: number; // In bytes
@@ -32,13 +33,16 @@ export interface Order {
   customer_email: string;
   customer_phone: string;
   amount: number;
-  status: 'created' | 'paid' | 'failed';
+  status: 'created' | 'pending_verification' | 'paid' | 'failed' | 'rejected';
   payment_id?: string;
   payment_method?: string;
   utr_number?: string;
-  download_token?: string;
+  download_token?: string | null;
   download_count: number;
   last_downloaded_at?: string;
+  submitted_at?: string;
+  paid_at?: string;
+  approved_by?: string;
   created_at: string;
 }
 

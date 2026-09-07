@@ -17,6 +17,7 @@ export default function App() {
     instagram_url: 'https://instagram.com/restore_healthphysio',
     support_email: 'restorehealthphysio@gmail.com',
     whatsapp_number: '+91 83407 49923',
+    upi_id: 'kamranalam8340749923-1@okhdfcbank',
   });
 
   const [notes, setNotes] = useState<Note[]>([]);
