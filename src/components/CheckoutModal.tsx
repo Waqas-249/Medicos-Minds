@@ -8,7 +8,6 @@ import {
   Lock, 
   Smartphone, 
   AlertCircle, 
-  CreditCard, 
   ArrowRight, 
   FileText, 
   ShieldCheck,
@@ -24,20 +23,37 @@ import {
   Phone,
   Mail,
   Clock,
-  XCircle
+  XCircle,
+  KeyRound,
+  Timer,
+  Zap,
+  Camera,
+  ChevronDown,
+  ChevronUp
 } from 'lucide-react';
 
 interface CheckoutModalProps {
   note: Note | null;
   onClose: () => void;
+  initialOrderId?: string | null;
 }
 
 type CheckoutStep = 'customer_info' | 'payment_process' | 'verification_pending' | 'payment_success' | 'payment_rejected';
 
+// Known fake / disposable email domain blocklist to prevent random/fake email access
+const DISPOSABLE_DOMAINS = new Set([
+  'tempmail.com', 'mailinator.com', 'guerrillamail.com', '10minutemail.com',
+  'throwaway.com', 'fakemail.com', 'yopmail.com', 'sharklasers.com',
+  'getnada.com', 'dispostable.com', 'test.com', 'example.com', 'asdf.com',
+  'random.com', 'fake.com', 'trashmail.com', 'throwawaymail.com', 'burnermail.io',
+  'dropmail.me', 'maildrop.cc', 'emailondeck.com', 'mohmal.com', 'temp-mail.org',
+  'tempmailo.com', 'zillamail.com', 'mytemp.email', 'crazymailing.com'
+]);
+
 // Strict Email Validation Helper
 const isValidEmail = (email: string): boolean => {
   if (!email) return false;
-  const trimmed = email.trim();
+  const trimmed = email.trim().toLowerCase();
   if (trimmed.length < 6 || trimmed.length > 254 || /\s/.test(trimmed)) return false;
   const emailRegex = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$/;
   if (!emailRegex.test(trimmed)) return false;
@@ -45,12 +61,13 @@ const isValidEmail = (email: string): boolean => {
   if (parts.length !== 2) return false;
   const domain = parts[1];
   if (!domain.includes('.')) return false;
+  if (DISPOSABLE_DOMAINS.has(domain)) return false;
   const tld = domain.split('.').pop();
   if (!tld || tld.length < 2 || !/^[a-zA-Z]+$/.test(tld)) return false;
   return true;
 };
 
-export const CheckoutModal: React.FC<CheckoutModalProps> = ({ note, onClose }) => {
+export const CheckoutModal: React.FC<CheckoutModalProps> = ({ note, onClose, initialOrderId }) => {
   // Step & Customer Details State
   const [step, setStep] = useState<CheckoutStep>('customer_info');
   const [customerName, setCustomerName] = useState(() => {
@@ -75,20 +92,44 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ note, onClose }) =
     return '';
   });
 
+  // Email OTP verification state
+  const [emailOtpSent, setEmailOtpSent] = useState(false);
+  const [emailOtpCode, setEmailOtpCode] = useState('');
+  const [emailVerified, setEmailVerified] = useState(false);
+  const [verifyingOtp, setVerifyingOtp] = useState(false);
+  const [otpNotice, setOtpNotice] = useState<string | null>(null);
+
+  // UTR / Transaction Reference
+  const [utrNumber, setUtrNumber] = useState('');
+
+  // 5-Minute QR Session Timer & Verification State
+  const [cooldownSeconds, setCooldownSeconds] = useState(300); // 300s = 5 minutes
+  const [isExpired, setIsExpired] = useState(false);
+  const [returnedFromUpi, setReturnedFromUpi] = useState(false);
+  const hasLeftToUpiAppRef = React.useRef(false);
+
   // Order & Payment State
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [createdOrderId, setCreatedOrderId] = useState<string | null>(null);
+  const [rejectionReason, setRejectionReason] = useState<string | null>(null);
+  const [createdOrderId, setCreatedOrderId] = useState<string | null>(initialOrderId || null);
   const [downloadToken, setDownloadToken] = useState<string | null>(null);
   const [paidOrder, setPaidOrder] = useState<Order | null>(null);
   
   // Store & UPI details returned from server
   const [storeName, setStoreName] = useState('MEDICOS⛑️MINDS');
-  const [upiId, setUpiId] = useState('kamranalam8340749923-1@okhdfcbank');
+  const [upiId, setUpiId] = useState('restorehealthphysio@okaxis');
   const [whatsappNumber, setWhatsappNumber] = useState('+91 83407 49923');
   const [supportEmail, setSupportEmail] = useState('restorehealthphysio@gmail.com');
   const [instagramHandle, setInstagramHandle] = useState('restore_healthphysio');
   const [instagramUrl, setInstagramUrl] = useState('');
+
+  // Server-provided NPCI UPI URIs
+  const [serverUpiUri, setServerUpiUri] = useState<string>('');
+  const [serverGpayUri, setServerGpayUri] = useState<string>('');
+  const [serverPhonepeUri, setServerPhonepeUri] = useState<string>('');
+  const [serverPaytmUri, setServerPaytmUri] = useState<string>('');
+  const [returnUrl, setReturnUrl] = useState<string>('');
 
   // UPI QR Code State
   const [qrDataUrl, setQrDataUrl] = useState<string>('');
@@ -97,13 +138,16 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ note, onClose }) =
   const [checkingStatus, setCheckingStatus] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
-  // Generate dynamic UPI URL & QR code whenever order or UPI details change
+  // Generate dynamic NPCI UPI URL & QR code whenever order or UPI details change
   useEffect(() => {
     if (!note || !createdOrderId) return;
 
     const targetUpi = upiId || 'kamranalam8340749923-1@okhdfcbank';
     const noteNameClean = note.title.slice(0, 30).replace(/[^a-zA-Z0-9 ]/g, '');
-    const upiUri = `upi://pay?pa=${targetUpi}&pn=${encodeURIComponent(storeName)}&am=${note.price}&cu=INR&tn=${encodeURIComponent(noteNameClean)}`;
+    const currentReturnUrl = returnUrl || `${window.location.origin}/?order_id=${encodeURIComponent(createdOrderId)}&check_status=true`;
+    
+    // NPCI standard UPI URI with tr (Order ID) and url callback parameters
+    const upiUri = serverUpiUri || `upi://pay?pa=${encodeURIComponent(targetUpi)}&pn=${encodeURIComponent(storeName)}&mc=0000&tr=${encodeURIComponent(createdOrderId)}&tn=${encodeURIComponent(`Order ${createdOrderId} - ${noteNameClean}`)}&am=${Number(note.price).toFixed(2)}&cu=INR&url=${encodeURIComponent(currentReturnUrl)}`;
 
     QRCode.toDataURL(upiUri, {
       width: 260,
@@ -115,36 +159,50 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ note, onClose }) =
     })
       .then((url) => setQrDataUrl(url))
       .catch((err) => console.error('Error generating QR code', err));
-  }, [note, createdOrderId, upiId, storeName]);
+  }, [note, createdOrderId, upiId, storeName, serverUpiUri, returnUrl]);
 
-  // Status polling hook: when awaiting verification, check order status automatically every 4 seconds
+  // If opened with initialOrderId from URL redirect, auto-check status
+  useEffect(() => {
+    if (initialOrderId) {
+      setCreatedOrderId(initialOrderId);
+      setStep('payment_process');
+      checkOrderStatus(false, initialOrderId);
+    }
+  }, [initialOrderId]);
+
+  // Status polling hook: when awaiting verification, check order status automatically every 3 seconds
   useEffect(() => {
     if (step !== 'verification_pending' || !createdOrderId) return;
     const interval = setInterval(() => {
       checkOrderStatus(true);
-    }, 4000);
+    }, 3000);
     return () => clearInterval(interval);
   }, [step, createdOrderId]);
 
-  // Check Order Status function
-  const checkOrderStatus = async (silent = false) => {
-    if (!createdOrderId || !note) return;
+  // Check Order Status function - Calls dedicated backend /api/checkout/check-status endpoint
+  const checkOrderStatus = async (silent = false, orderIdOverride?: string) => {
+    const targetId = orderIdOverride || createdOrderId;
+    if (!targetId || !note) return;
     if (!silent) setCheckingStatus(true);
 
     try {
-      const res = await fetch(`/api/orders/${createdOrderId}/status`);
+      const res = await fetch('/api/checkout/check-status', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ order_id: targetId }),
+      });
       const data = await res.json();
       if (res.ok && data) {
         if (data.status === 'paid' && data.download_token) {
           setDownloadToken(data.download_token);
           setPaidOrder({
-            id: data.order_id,
+            id: data.order_id || targetId,
             note_id: note.id,
-            note_title: data.note_title || note.title,
-            customer_name: data.customer_name || customerName,
-            customer_email: data.customer_email || customerEmail,
+            note_title: note.title,
+            customer_name: customerName,
+            customer_email: customerEmail,
             customer_phone: customerPhone,
-            amount: data.amount || note.price,
+            amount: note.price,
             status: 'paid',
             download_token: data.download_token,
             download_count: 0,
@@ -156,10 +214,21 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ note, onClose }) =
         } else if (data.status === 'rejected') {
           setError(null);
           setDownloadToken('');
+          setRejectionReason(data.rejection_reason || 'Payment could not be verified in bank/UPI records.');
           setStep('payment_rejected');
-        } else if (!silent) {
-          setStatusMessage('Status checked: Awaiting creator verification.');
-          setTimeout(() => setStatusMessage(null), 3500);
+        } else if (data.status === 'expired') {
+          setError('This payment session has expired. Please initiate a fresh checkout.');
+          setIsExpired(true);
+        } else if (data.status === 'pending_verification') {
+          if (!silent) {
+            setStatusMessage('Payment confirmation received! Awaiting creator verification.');
+            setTimeout(() => setStatusMessage(null), 4000);
+          }
+        } else {
+          if (!silent) {
+            setStatusMessage('No confirmed payment detected yet. If you completed the UPI transfer, please wait a moment or click "I have paid" to submit your UTR.');
+            setTimeout(() => setStatusMessage(null), 4500);
+          }
         }
       }
     } catch (err) {
@@ -175,7 +244,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ note, onClose }) =
     let digits = rawNumber.replace(/[^0-9]/g, '');
     if (digits.length === 10) digits = '91' + digits;
     const msg = encodeURIComponent(
-      `Hi MEDICOS MINDS! I have transferred ₹${note?.price} via UPI for "${note?.title}".\n\nOrder ID: ${createdOrderId}\nName: ${customerName}\nEmail: ${customerEmail}\n\nPlease verify my payment and unlock my PDF.`
+      `Hi MEDICOS MINDS! I have transferred ₹${note?.price} via UPI for "${note?.title}".\n\nOrder ID: ${createdOrderId}\nUTR Number: ${utrNumber || 'Submitted'}\nName: ${customerName}\nEmail: ${customerEmail}\n\nPlease verify my payment and unlock my PDF.`
     );
     return `https://wa.me/${digits}?text=${msg}`;
   };
@@ -189,6 +258,156 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ note, onClose }) =
       `Hi MEDICOS MINDS! My order (${createdOrderId}) for "${note?.title}" was marked unverified.\n\nName: ${customerName}\nEmail: ${customerEmail}\nAmount: ₹${note?.price}\n\nHere is my payment proof screenshot. Please verify and unlock my PDF.`
     );
     return `https://wa.me/${digits}?text=${msg}`;
+  };
+
+  // 5-Minute Session Timer: Starts counting down when in payment process
+  useEffect(() => {
+    if (step !== 'payment_process') return;
+
+    setCooldownSeconds(300); // 5 minutes
+    setIsExpired(false);
+    hasLeftToUpiAppRef.current = false;
+    setReturnedFromUpi(false);
+
+    const timer = setInterval(() => {
+      setCooldownSeconds((prev) => {
+        if (prev <= 1) {
+          clearInterval(timer);
+          setIsExpired(true);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, [step, createdOrderId]);
+
+  // Format MM:SS
+  const formatCooldown = (seconds: number) => {
+    const m = Math.floor(seconds / 60);
+    const s = seconds % 60;
+    return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+  };
+
+  // When returning from external UPI app, show helpful guidance to submit UTR
+  useEffect(() => {
+    if (step !== 'payment_process' || !createdOrderId || isExpired) return;
+
+    const handleReturnToTab = () => {
+      if (document.visibilityState === 'visible' && hasLeftToUpiAppRef.current) {
+        setReturnedFromUpi(true);
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleReturnToTab);
+    window.addEventListener('focus', handleReturnToTab);
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleReturnToTab);
+      window.removeEventListener('focus', handleReturnToTab);
+    };
+  }, [step, createdOrderId, isExpired]);
+
+  // Regenerate fresh QR when expired
+  const handleRegenerateQr = async () => {
+    if (!note) return;
+    setLoading(true);
+    setError(null);
+    setIsExpired(false);
+    setCooldownSeconds(300);
+    hasLeftToUpiAppRef.current = false;
+    try {
+      const res = await fetch('/api/checkout/create-order', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          note_id: note.id,
+          customer_name: customerName.trim(),
+          customer_email: customerEmail.trim(),
+          customer_phone: customerPhone.trim(),
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to refresh QR');
+      setCreatedOrderId(data.order_id);
+    } catch (err: any) {
+      setError('Could not generate a fresh QR. Please try again.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Download QR code image to gallery for scanner upload
+  const handleDownloadQr = () => {
+    if (!qrDataUrl) return;
+    const a = document.createElement('a');
+    a.href = qrDataUrl;
+    a.download = `UPI-QR-MEDICOS-MINDS-${createdOrderId || 'Payment'}.png`;
+    a.click();
+  };
+
+  // Send Email OTP for instant verification
+  const handleSendEmailOtp = async () => {
+    if (!customerEmail.trim()) {
+      setError('Please enter your email address first.');
+      return;
+    }
+    if (!isValidEmail(customerEmail)) {
+      setError('Please enter a valid personal or university email address (disposable or temporary emails are blocked).');
+      return;
+    }
+    setError(null);
+    setVerifyingOtp(true);
+    setOtpNotice(null);
+    try {
+      const res = await fetch('/api/auth/send-email-otp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: customerEmail.trim() }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to send verification code.');
+      }
+      setEmailOtpSent(true);
+      if (data.verification_code) {
+        setOtpNotice(`Verification Code: ${data.verification_code} (Enter below to confirm valid email)`);
+      } else {
+        setOtpNotice('Verification code sent! Please check your inbox and enter the 4-digit code.');
+      }
+    } catch (err: any) {
+      setError(err.message || 'Error generating email verification code.');
+    } finally {
+      setVerifyingOtp(false);
+    }
+  };
+
+  // Verify Email OTP
+  const handleVerifyEmailOtp = async () => {
+    if (!emailOtpCode.trim()) {
+      setError('Please enter the 4-digit code.');
+      return;
+    }
+    setError(null);
+    setVerifyingOtp(true);
+    try {
+      const res = await fetch('/api/auth/verify-email-otp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: customerEmail.trim(), code: emailOtpCode.trim() }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Invalid verification code.');
+      }
+      setEmailVerified(true);
+      setOtpNotice('Email successfully verified! ✓');
+    } catch (err: any) {
+      setError(err.message || 'Incorrect verification code. Please check and re-enter.');
+    } finally {
+      setVerifyingOtp(false);
+    }
   };
 
   // Handle Step 1: Submit info and create order on server with strict email check
@@ -207,7 +426,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ note, onClose }) =
     }
 
     if (!isValidEmail(customerEmail)) {
-      setError('Please enter a valid, deliverable email address (e.g. yourname@gmail.com). We will use this to verify and link your notes.');
+      setError('Please enter a valid, legitimate email address (e.g. yourname@gmail.com). Disposable or temporary emails like tempmail/mailinator are not accepted.');
       return;
     }
 
@@ -243,6 +462,11 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ note, onClose }) =
       setCreatedOrderId(data.order_id);
       if (data.store_name) setStoreName(data.store_name);
       if (data.upi_id) setUpiId(data.upi_id);
+      if (data.upi_uri) setServerUpiUri(data.upi_uri);
+      if (data.gpay_uri) setServerGpayUri(data.gpay_uri);
+      if (data.phonepe_uri) setServerPhonepeUri(data.phonepe_uri);
+      if (data.paytm_uri) setServerPaytmUri(data.paytm_uri);
+      if (data.return_url) setReturnUrl(data.return_url);
       if (data.whatsapp_number) setWhatsappNumber(data.whatsapp_number);
       if (data.support_email) setSupportEmail(data.support_email);
       if (data.instagram_handle) setInstagramHandle(data.instagram_handle);
@@ -256,9 +480,10 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ note, onClose }) =
     }
   };
 
-  // Handle Submit UPI Payment Confirmation (Marks order as pending verification - NO instant access!)
+  // Handle Submit UPI Payment Confirmation (UTR is optional; sends for confirmation in sales section)
   const handleSubmitUpiPayment = async () => {
-    if (!createdOrderId) return;
+    if (!createdOrderId || !note) return;
+    const cleanUtr = utrNumber.trim().replace(/[^a-zA-Z0-9]/g, '');
     setLoading(true);
     setError(null);
 
@@ -268,16 +493,37 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ note, onClose }) =
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           order_id: createdOrderId,
+          transaction_ref: cleanUtr || '',
         }),
       });
 
       const data = await res.json();
       if (!res.ok || !data.success) {
-        throw new Error(data.message || data.error || 'Submission failed.');
+        throw new Error(data.error || data.message || 'Submission failed. Please try again.');
       }
 
-      // Transition to verification pending screen
-      setStep('verification_pending');
+      // If instant verification was triggered and download token is returned
+      if (data.status === 'paid' && data.download_token) {
+        setDownloadToken(data.download_token);
+        setPaidOrder({
+          id: createdOrderId,
+          note_id: note.id,
+          note_title: note.title,
+          customer_name: customerName,
+          customer_email: customerEmail,
+          customer_phone: customerPhone,
+          amount: note.price,
+          status: 'paid',
+          download_token: data.download_token,
+          download_count: 0,
+          paid_at: new Date().toISOString(),
+          created_at: new Date().toISOString(),
+        });
+        setStep('payment_success');
+      } else {
+        // Transition to verification pending screen (Security Protected - Awaiting Creator Approval)
+        setStep('verification_pending');
+      }
     } catch (err: any) {
       setError(err.message || 'Error submitting payment confirmation. Please try again.');
     } finally {
@@ -310,7 +556,8 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ note, onClose }) =
 
   if (!note) return null;
 
-  const directUpiLink = `upi://pay?pa=${upiId}&pn=${encodeURIComponent(storeName)}&am=${note.price}&cu=INR&tn=${encodeURIComponent(note.title.slice(0, 30))}`;
+  const currentReturnUrl = returnUrl || (createdOrderId ? `${window.location.origin}/?order_id=${encodeURIComponent(createdOrderId)}&check_status=true` : '');
+  const directUpiLink = serverUpiUri || `upi://pay?pa=${encodeURIComponent(upiId || 'kamranalam8340749923-1@okhdfcbank')}&pn=${encodeURIComponent(storeName)}&mc=0000${createdOrderId ? `&tr=${encodeURIComponent(createdOrderId)}` : ''}&am=${Number(note.price).toFixed(2)}&cu=INR${currentReturnUrl ? `&url=${encodeURIComponent(currentReturnUrl)}` : ''}&tn=${encodeURIComponent(`Order ${createdOrderId || ''} - ${note.title.slice(0, 20)}`)}`;
 
   return (
     <div className="fixed inset-0 z-50 overflow-y-auto bg-stone-900/70 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 animate-in fade-in duration-150">
@@ -400,8 +647,8 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ note, onClose }) =
                     Email Address <span className="text-red-500">*</span>
                   </label>
                   {customerEmail.trim() && (
-                    <span className={`text-[11px] font-semibold ${isValidEmail(customerEmail) ? 'text-emerald-600' : 'text-amber-600'}`}>
-                      {isValidEmail(customerEmail) ? '✓ Valid format' : 'Must be valid (e.g. name@gmail.com)'}
+                    <span className={`text-[11px] font-semibold ${emailVerified ? 'text-emerald-700 font-bold' : isValidEmail(customerEmail) ? 'text-emerald-600' : 'text-red-500'}`}>
+                      {emailVerified ? '✓ Verified Email' : isValidEmail(customerEmail) ? 'Valid Format' : 'Invalid / Disposable Blocked'}
                     </span>
                   )}
                 </div>
@@ -413,14 +660,78 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ note, onClose }) =
                   value={customerEmail}
                   onChange={(e) => {
                     setCustomerEmail(e.target.value);
+                    setEmailVerified(false);
+                    setEmailOtpSent(false);
+                    setOtpNotice(null);
                     if (error) setError(null);
                   }}
                   className={`w-full px-3.5 py-2.5 rounded-xl border text-sm focus:outline-none focus:ring-2 bg-stone-50 ${
                     customerEmail.trim() && !isValidEmail(customerEmail)
-                      ? 'border-amber-400 focus:ring-amber-400'
+                      ? 'border-red-400 focus:ring-red-400'
+                      : emailVerified
+                      ? 'border-emerald-500 bg-emerald-50/30 focus:ring-emerald-500'
                       : 'border-stone-300 focus:ring-[#5C715E]'
                   }`}
                 />
+                
+                {/* Email Verification Action: Click to verify email address */}
+                <div className="mt-2">
+                  {!emailVerified && (
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[11px] text-stone-500">
+                        {emailOtpSent ? 'Enter code sent for this email:' : 'Confirm your genuine email address:'}
+                      </span>
+                      {!emailOtpSent ? (
+                        <button
+                          type="button"
+                          onClick={handleSendEmailOtp}
+                          disabled={verifyingOtp || !customerEmail.trim() || !isValidEmail(customerEmail)}
+                          className="text-[11px] font-bold text-[#5C715E] hover:text-[#4A5D4E] underline cursor-pointer disabled:opacity-40 shrink-0"
+                        >
+                          {verifyingOtp ? 'Sending code...' : 'Verify Email (Get Code)'}
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={handleSendEmailOtp}
+                          disabled={verifyingOtp}
+                          className="text-[11px] text-stone-500 hover:text-stone-700 underline cursor-pointer shrink-0"
+                        >
+                          Resend Code
+                        </button>
+                      )}
+                    </div>
+                  )}
+
+                  {otpNotice && (
+                    <div className="mt-1.5 p-2 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs flex items-center gap-1.5">
+                      <ShieldCheck className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                      <span className="font-semibold text-[11px]">{otpNotice}</span>
+                    </div>
+                  )}
+
+                  {emailOtpSent && !emailVerified && (
+                    <div className="mt-2 flex items-center gap-2">
+                      <input
+                        type="text"
+                        maxLength={6}
+                        placeholder="Enter 4-digit code"
+                        value={emailOtpCode}
+                        onChange={(e) => setEmailOtpCode(e.target.value.replace(/[^0-9]/g, ''))}
+                        className="px-3 py-1.5 w-36 rounded-xl border border-stone-300 text-xs font-mono text-center tracking-widest focus:outline-none focus:ring-2 focus:ring-[#5C715E]"
+                      />
+                      <button
+                        type="button"
+                        onClick={handleVerifyEmailOtp}
+                        disabled={verifyingOtp || !emailOtpCode.trim()}
+                        className="px-3 py-1.5 rounded-xl bg-[#5C715E] hover:bg-[#4A5D4E] text-white text-xs font-bold transition-colors cursor-pointer disabled:opacity-50"
+                      >
+                        {verifyingOtp ? 'Verifying...' : 'Confirm'}
+                      </button>
+                    </div>
+                  )}
+                </div>
+
                 <span className="text-[11px] text-stone-500 mt-1 block">
                   Your PDF access and order receipt will be securely sent to this email.
                 </span>
@@ -470,93 +781,295 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ note, onClose }) =
             </form>
           )}
 
-          {/* STEP 2: DIRECT UPI PAYMENT & QR SCANNER */}
+          {/* STEP 2: DIRECT UPI PAYMENT, 5-MIN COOLDOWN & REDIRECT VERIFICATION */}
           {step === 'payment_process' && (
             <div className="space-y-4">
-              <div className="space-y-3.5">
-                <div className="bg-[#F9F7F2] p-4 rounded-2xl border border-[#5C715E]/20 text-center flex flex-col items-center">
-                  <span className="text-[11px] font-bold text-stone-500 uppercase tracking-wider">
-                    Scan & Pay with Any UPI App
-                  </span>
-                  <div className="text-2xl font-black text-[#2D3436] mt-0.5">
-                    ₹{note.price}
-                  </div>
-
-                  {/* QR Code Container */}
-                  <div className="mt-3 p-2 bg-white rounded-2xl border border-stone-200 shadow-xs">
-                    {qrDataUrl ? (
-                      <img
-                        src={qrDataUrl}
-                        alt="UPI QR Code"
-                        className="w-48 h-48 sm:w-52 sm:h-52 rounded-xl object-contain mx-auto"
-                      />
-                    ) : (
-                      <div className="w-48 h-48 flex items-center justify-center text-stone-400 text-xs">
-                        Generating QR...
+              {/* 5-Minute Cooldown Timer Bar */}
+              <div className={`p-3.5 rounded-2xl border transition-all ${
+                isExpired 
+                  ? 'bg-red-50 border-red-200 text-red-900' 
+                  : cooldownSeconds < 60 
+                    ? 'bg-red-50 border-red-300 text-red-900' 
+                    : 'bg-amber-50/90 border-amber-200 text-amber-950'
+              }`}>
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="relative flex h-3 w-3">
+                      {!isExpired && (
+                        <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${
+                          cooldownSeconds < 60 ? 'bg-red-400' : 'bg-amber-400'
+                        }`}></span>
+                      )}
+                      <span className={`relative inline-flex rounded-full h-3 w-3 ${
+                        isExpired ? 'bg-red-500' : cooldownSeconds < 60 ? 'bg-red-500' : 'bg-amber-500'
+                      }`}></span>
+                    </span>
+                    <div>
+                      <div className="text-xs font-bold flex items-center gap-1.5">
+                        <Timer className="w-3.5 h-3.5" />
+                        <span>{isExpired ? 'Payment Session Expired' : '5-Minute Active Session'}</span>
                       </div>
-                    )}
+                      <div className="text-[11px] opacity-80">
+                        {isExpired 
+                          ? 'Please refresh to generate a new QR' 
+                          : 'Auto-verifies upon return from UPI app'}
+                      </div>
+                    </div>
+                  </div>
+                  <div className={`font-mono text-sm font-black px-2.5 py-1 rounded-xl border ${
+                    isExpired 
+                      ? 'bg-red-100 border-red-300 text-red-700' 
+                      : cooldownSeconds < 60 
+                        ? 'bg-red-100 border-red-300 text-red-700 animate-pulse' 
+                        : 'bg-white border-amber-300 text-amber-900 shadow-xs'
+                  }`}>
+                    {isExpired ? '00:00' : formatCooldown(cooldownSeconds)}
+                  </div>
+                </div>
+
+                {/* Progress bar */}
+                {!isExpired && (
+                  <div className="w-full bg-stone-200/80 h-1.5 rounded-full overflow-hidden mt-2.5">
+                    <div 
+                      className={`h-full transition-all duration-1000 ${
+                        cooldownSeconds < 60 ? 'bg-red-500' : 'bg-[#5C715E]'
+                      }`}
+                      style={{ width: `${Math.max(0, (cooldownSeconds / 300) * 100)}%` }}
+                    />
+                  </div>
+                )}
+              </div>
+
+              {/* Expired State UI */}
+              {isExpired ? (
+                <div className="bg-white p-5 rounded-2xl border border-stone-200 text-center space-y-3 shadow-xs">
+                  <AlertCircle className="w-10 h-10 text-red-500 mx-auto" />
+                  <div>
+                    <h4 className="font-bold text-stone-900 text-sm">QR Code Expired</h4>
+                    <p className="text-xs text-stone-500 mt-1 leading-relaxed">
+                      For your payment security, UPI QR sessions are valid for 5 minutes. Click below to regenerate a fresh QR code.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={loading}
+                    onClick={handleRegenerateQr}
+                    className="w-full inline-flex items-center justify-center gap-2 py-3 px-4 bg-[#5C715E] hover:bg-[#4A5D4E] text-white rounded-xl font-bold text-xs shadow-md transition-all cursor-pointer"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
+                    <span>Generate Fresh QR Code</span>
+                  </button>
+                </div>
+              ) : (
+                <div className="space-y-3.5">
+                  {/* QR Code Container & Amount */}
+                  <div className="bg-[#F9F7F2] p-4 rounded-2xl border border-[#5C715E]/20 text-center flex flex-col items-center">
+                    <span className="text-[11px] font-bold text-stone-500 uppercase tracking-wider">
+                      Scan with GPay / PhonePe / Paytm
+                    </span>
+                    <div className="text-2xl font-black text-[#2D3436] mt-0.5">
+                      ₹{note.price}
+                    </div>
+
+                    {/* QR Code Graphic */}
+                    <div className="mt-3 p-2.5 bg-white rounded-2xl border border-stone-200 shadow-xs relative group">
+                      {qrDataUrl ? (
+                        <img
+                          src={qrDataUrl}
+                          alt="UPI QR Code"
+                          className="w-48 h-48 sm:w-52 sm:h-52 rounded-xl object-contain mx-auto"
+                        />
+                      ) : (
+                        <div className="w-48 h-48 flex items-center justify-center text-stone-400 text-xs">
+                          Generating QR...
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Screenshot / Download QR Helper */}
+                    <div className="mt-2 flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={handleDownloadQr}
+                        className="inline-flex items-center gap-1.5 px-3 py-1 bg-white hover:bg-stone-50 border border-stone-200 rounded-lg text-[11px] font-semibold text-stone-600 shadow-2xs transition-colors cursor-pointer"
+                        title="Download or screenshot QR to scan in GPay/Paytm scanner"
+                      >
+                        <Camera className="w-3.5 h-3.5 text-[#5C715E]" />
+                        <span>Screenshot / Save QR</span>
+                      </button>
+                    </div>
+
+                    {/* Quick 1-Tap Mobile App Buttons */}
+                    <div className="mt-3 w-full space-y-2">
+                      <div className="text-[10px] font-bold text-stone-400 uppercase tracking-wider">
+                        Or Tap Your UPI App to Pay Directly
+                      </div>
+                      
+                      <div className="grid grid-cols-2 gap-2">
+                        {/* Google Pay */}
+                        <a
+                          href={serverGpayUri || directUpiLink}
+                          onClick={() => { hasLeftToUpiAppRef.current = true; }}
+                          className="inline-flex items-center justify-center gap-1.5 py-2.5 px-3 bg-white hover:bg-stone-50 text-stone-800 border border-stone-200 rounded-xl font-bold text-xs shadow-2xs transition-all active:scale-98"
+                        >
+                          <Smartphone className="w-3.5 h-3.5 text-blue-600" />
+                          <span>Google Pay</span>
+                        </a>
+
+                        {/* PhonePe */}
+                        <a
+                          href={serverPhonepeUri || directUpiLink}
+                          onClick={() => { hasLeftToUpiAppRef.current = true; }}
+                          className="inline-flex items-center justify-center gap-1.5 py-2.5 px-3 bg-white hover:bg-stone-50 text-stone-800 border border-stone-200 rounded-xl font-bold text-xs shadow-2xs transition-all active:scale-98"
+                        >
+                          <Smartphone className="w-3.5 h-3.5 text-purple-600" />
+                          <span>PhonePe</span>
+                        </a>
+
+                        {/* Paytm */}
+                        <a
+                          href={serverPaytmUri || directUpiLink}
+                          onClick={() => { hasLeftToUpiAppRef.current = true; }}
+                          className="inline-flex items-center justify-center gap-1.5 py-2.5 px-3 bg-white hover:bg-stone-50 text-stone-800 border border-stone-200 rounded-xl font-bold text-xs shadow-2xs transition-all active:scale-98"
+                        >
+                          <Smartphone className="w-3.5 h-3.5 text-sky-600" />
+                          <span>Paytm</span>
+                        </a>
+
+                        {/* Other UPI Apps */}
+                        <a
+                          href={serverUpiUri || directUpiLink}
+                          onClick={() => { hasLeftToUpiAppRef.current = true; }}
+                          className="inline-flex items-center justify-center gap-1.5 py-2.5 px-3 bg-white hover:bg-stone-50 text-stone-800 border border-stone-200 rounded-xl font-bold text-xs shadow-2xs transition-all active:scale-98"
+                        >
+                          <Smartphone className="w-3.5 h-3.5 text-emerald-600" />
+                          <span>Any UPI App</span>
+                        </a>
+                      </div>
+                    </div>
+
+                    {/* Prominent Check Status Action (Instant verification from bank/webhook records) */}
+                    <div className="mt-3.5 w-full space-y-1.5">
+                      <button
+                        id="check-payment-status-btn"
+                        type="button"
+                        disabled={checkingStatus}
+                        onClick={() => checkOrderStatus(false)}
+                        className="w-full inline-flex items-center justify-center gap-2 py-3 px-4 bg-emerald-700 hover:bg-emerald-800 text-white rounded-xl font-bold text-xs sm:text-sm shadow-sm transition-all active:scale-98 disabled:opacity-60 cursor-pointer"
+                      >
+                        {checkingStatus ? (
+                          <>
+                            <RefreshCw className="w-4 h-4 animate-spin" />
+                            <span>Checking Payment Status with Bank...</span>
+                          </>
+                        ) : (
+                          <>
+                            <CheckCircle2 className="w-4 h-4 text-emerald-300" />
+                            <span>I've Completed Payment — Check Status</span>
+                          </>
+                        )}
+                      </button>
+
+                      {statusMessage && (
+                        <div className="p-2.5 bg-stone-100 border border-stone-200 rounded-xl text-[11px] text-stone-700 font-medium text-center animate-in fade-in">
+                          {statusMessage}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* UPI ID & Copy button */}
+                    <div className="mt-2.5 flex items-center justify-between w-full max-w-xs px-3 py-1.5 bg-white rounded-xl border border-stone-200 text-xs">
+                      <span className="font-mono text-stone-700 truncate text-[11px]">{upiId}</span>
+                      <button
+                        type="button"
+                        onClick={handleCopyUpi}
+                        className="inline-flex items-center gap-1 text-[11px] font-bold text-[#5C715E] hover:text-[#4A5D4E] shrink-0 ml-2 cursor-pointer"
+                      >
+                        {copiedUpi ? (
+                          <>
+                            <Check className="w-3.5 h-3.5 text-emerald-600" />
+                            <span className="text-emerald-600">Copied</span>
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-3.5 h-3.5" />
+                            <span>Copy UPI</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
                   </div>
 
-                  {/* Mobile 1-Tap UPI Intent Button */}
-                  <div className="mt-3 w-full">
-                    <a
-                      href={directUpiLink}
-                      className="w-full inline-flex items-center justify-center gap-2 py-2.5 px-4 bg-[#5C715E] hover:bg-[#4A5D4E] text-white rounded-xl font-bold text-xs shadow-sm transition-colors"
-                    >
-                      <Smartphone className="w-4 h-4" />
-                      <span>Tap to Pay on Mobile (GPay / PhonePe / Paytm)</span>
-                    </a>
+                  {/* Notice when returning from UPI app */}
+                  {returnedFromUpi && (
+                    <div className="p-3 bg-emerald-50 border border-emerald-300 rounded-2xl flex items-center gap-2.5 text-emerald-950 text-xs font-semibold animate-in fade-in">
+                      <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0" />
+                      <span>Returned from UPI app? Click "Check Status" above to verify, or enter the 12-digit UTR from your receipt below.</span>
+                    </div>
+                  )}
+
+                  {/* Optional UTR / UPI Reference Number Input Section */}
+                  <div className="p-4 bg-stone-50/90 rounded-2xl border border-stone-200 space-y-3 text-left">
+                    <div className="flex items-center justify-between">
+                      <label htmlFor="checkout-utr-number" className="text-xs font-bold text-[#2D3436] flex items-center gap-1.5">
+                        <ShieldCheck className="w-4 h-4 text-[#5C715E]" />
+                        <span>Step 2: UPI Reference / UTR Number</span>
+                      </label>
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-stone-500 bg-stone-200/80 px-2 py-0.5 rounded-full">
+                        Optional
+                      </span>
+                    </div>
+
+                    <div className="relative">
+                      <input
+                        id="checkout-utr-number"
+                        type="text"
+                        maxLength={25}
+                        placeholder="e.g. 423589123456 (Optional)"
+                        value={utrNumber}
+                        onChange={(e) => {
+                          setUtrNumber(e.target.value.replace(/[^a-zA-Z0-9]/g, ''));
+                          if (error) setError(null);
+                        }}
+                        className="w-full px-3.5 py-2.5 rounded-xl border border-stone-300 text-sm font-mono tracking-wider focus:outline-none focus:ring-2 focus:ring-[#5C715E] bg-white placeholder:text-stone-400 placeholder:tracking-normal placeholder:font-sans"
+                      />
+                    </div>
+
+                    <div className="text-[11px] text-stone-500 space-y-0.5">
+                      <p className="font-semibold text-stone-600">Have your 12-digit number? (Optional)</p>
+                      <p className="text-[10px] text-stone-500 leading-relaxed">
+                        If available on your receipt, entering it speeds up verification. If you don't know it or can't find it, you can leave it blank and tap the button below directly!
+                      </p>
+                    </div>
                   </div>
 
-                  {/* UPI ID & Copy button */}
-                  <div className="mt-2.5 flex items-center justify-between w-full max-w-xs px-3 py-1.5 bg-white rounded-xl border border-stone-200 text-xs">
-                    <span className="font-mono text-stone-700 truncate">{upiId}</span>
+                  {/* Submit Verification Action Button */}
+                  <div className="pt-1">
                     <button
+                      id="confirm-upi-payment-btn"
                       type="button"
-                      onClick={handleCopyUpi}
-                      className="inline-flex items-center gap-1 text-[11px] font-bold text-[#5C715E] hover:text-[#4A5D4E] shrink-0 ml-2 cursor-pointer"
+                      disabled={loading}
+                      onClick={handleSubmitUpiPayment}
+                      className="w-full inline-flex items-center justify-center gap-2 py-3.5 px-4 bg-[#5C715E] hover:bg-[#4A5D4E] text-white rounded-xl font-bold text-sm shadow-md shadow-[#5C715E]/20 transition-all active:scale-98 disabled:opacity-50 cursor-pointer"
                     >
-                      {copiedUpi ? (
-                        <>
-                          <Check className="w-3.5 h-3.5 text-emerald-600" />
-                          <span className="text-emerald-600">Copied</span>
-                        </>
+                      {loading ? (
+                        <div className="flex items-center gap-2">
+                          <RefreshCw className="w-4 h-4 animate-spin" />
+                          <span>Submitting for Confirmation...</span>
+                        </div>
                       ) : (
                         <>
-                          <Copy className="w-3.5 h-3.5" />
-                          <span>Copy UPI</span>
+                          <ShieldCheck className="w-4 h-4" />
+                          <span>I have transferred money, get my PDF</span>
                         </>
                       )}
                     </button>
+                    <p className="text-[11px] text-center text-stone-500 mt-2">
+                      Tapping this sends your transfer for confirmation in the creator's sales section. Once approved, your PDF will unlock automatically!
+                    </p>
                   </div>
                 </div>
-
-                {/* Confirm Payment Action */}
-                <div className="pt-1">
-                  <button
-                    id="confirm-upi-payment-btn"
-                    type="button"
-                    disabled={loading}
-                    onClick={handleSubmitUpiPayment}
-                    className="w-full inline-flex items-center justify-center gap-2 py-3.5 px-4 bg-[#5C715E] hover:bg-[#4A5D4E] text-white rounded-xl font-bold text-sm shadow-md shadow-[#5C715E]/20 transition-all active:scale-98 disabled:opacity-50 cursor-pointer"
-                  >
-                    {loading ? (
-                      <div className="flex items-center gap-2">
-                        <RefreshCw className="w-4 h-4 animate-spin" />
-                        <span>Submitting Confirmation...</span>
-                      </div>
-                    ) : (
-                      <>
-                        <CheckCircle2 className="w-4 h-4" />
-                        <span>I Have Paid ₹{note.price} — Submit Confirmation</span>
-                      </>
-                    )}
-                  </button>
-                  <p className="text-[11px] text-center text-stone-500 mt-2">
-                    After scanning the QR code and completing your UPI transfer, click above to submit for verification.
-                  </p>
-                </div>
-              </div>
+              )}
 
               {/* Payment Support Help */}
               <div className="p-3 bg-emerald-50/70 rounded-xl border border-emerald-200 text-xs text-emerald-950 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
@@ -610,9 +1123,17 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ note, onClose }) =
                 <p className="text-xs text-amber-700 font-bold uppercase tracking-wider mt-0.5">
                   Awaiting Creator Verification
                 </p>
-                <p className="text-xs text-stone-500 mt-1">
-                  Order ID: <span className="font-mono font-bold text-stone-700">{createdOrderId}</span>
-                </p>
+                <div className="flex items-center justify-center gap-2 mt-2 flex-wrap text-xs">
+                  <span className="text-stone-500 font-mono">Order: <strong className="text-stone-800">{createdOrderId}</strong></span>
+                  {utrNumber && (
+                    <>
+                      <span className="text-stone-300">•</span>
+                      <span className="text-stone-500 font-mono">UTR: <strong className="text-stone-800 bg-amber-100 px-1.5 py-0.5 rounded">{utrNumber}</strong></span>
+                    </>
+                  )}
+                  <span className="text-stone-300">•</span>
+                  <span className="font-bold text-[#5C715E]">₹{note.price}</span>
+                </div>
               </div>
 
               <div className="p-3.5 bg-amber-50/80 rounded-2xl border border-amber-200 text-left text-xs space-y-2">
@@ -711,10 +1232,10 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ note, onClose }) =
               <div className="p-3.5 bg-red-50/80 rounded-2xl border border-red-200 text-left text-xs text-red-950 space-y-1.5">
                 <div className="flex items-center gap-1.5 font-bold text-red-800">
                   <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
-                  <span>Transaction not found in UPI records</span>
+                  <span>{rejectionReason || "Transaction could not be verified in UPI records"}</span>
                 </div>
                 <p className="text-[11px] text-red-800/90 leading-relaxed">
-                  The store admin checked their UPI records and could not match a completed transaction for this request. PDF access is currently withheld.
+                  The store admin checked their UPI records and could not confirm a completed transaction matching this request. PDF access is currently withheld. If money was deducted from your account, please send your payment screenshot on WhatsApp so the admin can verify and unlock your PDF.
                 </p>
               </div>
 

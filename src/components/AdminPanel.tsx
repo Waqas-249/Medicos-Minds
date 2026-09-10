@@ -100,6 +100,8 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   const [settingsEmail, setSettingsEmail] = useState(profile.support_email);
   const [settingsUpiId, setSettingsUpiId] = useState(profile.upi_id || '');
   const [settingsWhatsapp, setSettingsWhatsapp] = useState(profile.whatsapp_number || '+91 83407 49923');
+  const [settingsAdminPin, setSettingsAdminPin] = useState(profile.admin_pin || '1234');
+  const [showSettingsPin, setShowSettingsPin] = useState(false);
   const [settingsSaving, setSettingsSaving] = useState(false);
   const [settingsSuccess, setSettingsSuccess] = useState(false);
 
@@ -119,6 +121,10 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   // Order Approval & Rejection State
   const [processingOrderId, setProcessingOrderId] = useState<string | null>(null);
   const [orderNotification, setOrderNotification] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [orderFilter, setOrderFilter] = useState<'all' | 'pending' | 'paid' | 'rejected'>('all');
+  const [orderToReject, setOrderToReject] = useState<any | null>(null);
+  const [rejectReasonInput, setRejectReasonInput] = useState('');
+  const [isSubmittingReject, setIsSubmittingReject] = useState(false);
 
   // In-App Order Deletion State
   const [orderToDelete, setOrderToDelete] = useState<any | null>(null);
@@ -140,6 +146,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     setSettingsEmail(profile.support_email);
     if (profile.upi_id) setSettingsUpiId(profile.upi_id);
     if (profile.whatsapp_number) setSettingsWhatsapp(profile.whatsapp_number);
+    if (profile.admin_pin) setSettingsAdminPin(profile.admin_pin);
   }, [profile]);
 
   // Fetch admin data when logged in
@@ -176,6 +183,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
         if (settingsData.upi_id) setSettingsUpiId(settingsData.upi_id);
         if (settingsData.whatsapp_number) setSettingsWhatsapp(settingsData.whatsapp_number);
         if (settingsData.support_email) setSettingsEmail(settingsData.support_email);
+        if (settingsData.admin_pin) setSettingsAdminPin(settingsData.admin_pin);
       }
     } catch (err) {
       console.error('Error fetching admin data:', err);
@@ -510,21 +518,30 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     }
   };
 
-  // Handle Reject Order (Direct, instant rejection with live status update)
-  const handleRejectOrder = async (orderId: string) => {
+  // Handle Reject Order (Direct rejection with live status update and optional reason)
+  const handleRejectOrder = async (orderId: string, customReason?: string) => {
     if (!adminToken || processingOrderId) return;
     setProcessingOrderId(orderId);
+    setIsSubmittingReject(true);
     try {
       const res = await fetch(`/api/admin/orders/${orderId}/reject`, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${adminToken}` },
+        headers: { 
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${adminToken}` 
+        },
+        body: JSON.stringify({ 
+          reason: customReason || rejectReasonInput.trim() || 'Payment could not be verified in bank/UPI records.' 
+        }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to reject order');
       
+      setOrderToReject(null);
+      setRejectReasonInput('');
       setOrderNotification({
         type: 'success',
-        text: 'Order rejected! Access to note PDF has been denied.',
+        text: 'Order rejected. Note PDF access remains locked.',
       });
       setTimeout(() => setOrderNotification(null), 4000);
       await fetchAdminData();
@@ -536,6 +553,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       setTimeout(() => setOrderNotification(null), 4000);
     } finally {
       setProcessingOrderId(null);
+      setIsSubmittingReject(false);
     }
   };
 
@@ -621,6 +639,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
           support_email: settingsEmail,
           whatsapp_number: settingsWhatsapp,
           upi_id: settingsUpiId.trim(),
+          admin_pin: settingsAdminPin.trim(),
         }),
       });
 
@@ -677,6 +696,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
         type: 'success',
         text: `Security PIN updated to "${newPinInput.trim()}" successfully! Use this new PIN for future logins.`,
       });
+      setSettingsAdminPin(newPinInput.trim());
       setCurrentPinInput('');
       setNewPinInput('');
       setConfirmPinInput('');
@@ -1483,8 +1503,17 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                                       <span>{pOrder.customer_email}</span>
                                       {pOrder.customer_phone && <span> • +91 {pOrder.customer_phone}</span>}
                                     </div>
-                                    <div className="text-[10px] font-mono text-stone-400 mt-0.5">
-                                      Order: {pOrder.id}
+                                    <div className="flex items-center gap-2 mt-1 flex-wrap text-[10px]">
+                                      <span className="font-mono text-stone-400">Order: {pOrder.id}</span>
+                                      {pOrder.utr_number ? (
+                                        <span className="font-mono font-bold bg-amber-100 text-amber-900 px-1.5 py-0.5 rounded border border-amber-200">
+                                          UTR: {pOrder.utr_number}
+                                        </span>
+                                      ) : (
+                                        <span className="font-sans text-stone-600 bg-stone-100 px-1.5 py-0.5 rounded border border-stone-200">
+                                          No UTR (Match via ₹{pOrder.amount} from {pOrder.customer_name})
+                                        </span>
+                                      )}
                                     </div>
                                   </div>
 
@@ -1501,11 +1530,11 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                                     <button
                                       type="button"
                                       disabled={processingOrderId === pOrder.id}
-                                      onClick={() => handleRejectOrder(pOrder.id)}
+                                      onClick={() => setOrderToReject(pOrder)}
                                       className="flex-1 sm:flex-none inline-flex items-center justify-center gap-1.5 px-3 py-1.5 bg-white hover:bg-red-50 text-red-700 border border-red-200 rounded-xl font-bold text-xs transition-colors cursor-pointer disabled:opacity-50"
                                     >
                                       <XCircle className="w-3.5 h-3.5" />
-                                      <span>{processingOrderId === pOrder.id ? 'Rejecting...' : 'Reject'}</span>
+                                      <span>Reject</span>
                                     </button>
                                     <button
                                       type="button"
@@ -1523,128 +1552,223 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                         );
                       })()}
 
-                      {/* Full Orders History */}
-                      <div className="divide-y divide-stone-100 border border-stone-200 rounded-2xl overflow-hidden text-xs bg-white">
-                        {adminOrders.map((order) => (
-                          <div key={order.id} className="p-4 flex flex-col sm:flex-row justify-between gap-3 hover:bg-stone-50/80 transition-colors">
-                            <div className="space-y-1">
-                              <div className="flex items-center gap-2 flex-wrap">
-                                <span className="font-bold text-[#2D3436] text-sm">
-                                  {order.customer_name}
-                                </span>
-                                <span
-                                  className={`px-2 py-0.5 rounded-md text-[10px] font-bold ${
-                                    order.status === 'paid'
-                                      ? 'bg-emerald-100 text-emerald-800'
-                                      : order.status === 'pending_verification'
-                                      ? 'bg-amber-100 text-amber-800 animate-pulse'
-                                      : order.status === 'rejected'
-                                      ? 'bg-red-100 text-red-800'
-                                      : 'bg-stone-100 text-stone-700'
-                                  }`}
-                                >
-                                  {order.status === 'paid'
-                                    ? 'Paid & Verified'
-                                    : order.status === 'pending_verification'
-                                    ? 'Pending Verification'
-                                    : order.status === 'rejected'
-                                    ? 'Rejected'
-                                    : order.status}
-                                </span>
-                                {order.payment_method && (
-                                  <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-stone-100 text-stone-600 uppercase">
-                                    {order.payment_method}
-                                  </span>
-                                )}
-                              </div>
-
-                              <div className="text-stone-600">
-                                <strong>Note:</strong> {order.note_title} • <strong>Amount:</strong> ₹{order.amount}
-                              </div>
-                              <div className="text-stone-500">
-                                <span>{order.customer_email}</span>
-                                {order.customer_phone && <span> • +91 {order.customer_phone}</span>}
-                              </div>
-                              <div className="text-[11px] font-mono text-stone-400">
-                                Order ID: {order.id}
-                              </div>
-
-                              {order.download_token && order.status === 'paid' && (
-                                <div className="flex items-center gap-2 pt-1">
-                                  <a
-                                    href={`/api/view/${order.download_token}`}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    className="text-[11px] font-bold text-[#5C715E] hover:underline"
-                                  >
-                                    Preview Student PDF ↗
-                                  </a>
-                                  <span className="text-stone-300">•</span>
-                                  <a
-                                    href={`/api/download/${order.download_token}`}
-                                    className="text-[11px] font-bold text-stone-600 hover:text-stone-900 hover:underline"
-                                  >
-                                    Download File
-                                  </a>
-                                </div>
-                              )}
-
-                               {order.status === 'pending_verification' && (
-                                <div className="flex items-center gap-2 pt-2">
-                                  <button
-                                    type="button"
-                                    disabled={processingOrderId === order.id}
-                                    onClick={() => handleApproveOrder(order.id)}
-                                    className="inline-flex items-center gap-1.5 px-3 py-1 bg-[#5C715E] hover:bg-[#4A5D4E] text-white rounded-lg font-bold text-xs shadow-2xs transition-colors cursor-pointer disabled:opacity-50"
-                                  >
-                                    <CheckCircle2 className="w-3.5 h-3.5" />
-                                    <span>{processingOrderId === order.id ? 'Processing...' : 'Approve & Unlock PDF'}</span>
-                                  </button>
-                                  <button
-                                    type="button"
-                                    disabled={processingOrderId === order.id}
-                                    onClick={() => handleRejectOrder(order.id)}
-                                    className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-white hover:bg-red-50 text-red-700 border border-red-200 rounded-lg font-semibold text-xs transition-colors cursor-pointer disabled:opacity-50"
-                                  >
-                                    <XCircle className="w-3.5 h-3.5" />
-                                    <span>{processingOrderId === order.id ? 'Rejecting...' : 'Reject'}</span>
-                                  </button>
-                                </div>
-                              )}
-
-                              {order.status === 'rejected' && (
-                                <div className="pt-1">
-                                  <button
-                                    type="button"
-                                    onClick={() => handleApproveOrder(order.id)}
-                                    className="text-[11px] font-bold text-[#5C715E] hover:underline cursor-pointer"
-                                  >
-                                    Re-approve & Unlock PDF
-                                  </button>
-                                </div>
-                              )}
-                            </div>
-
-                            <div className="flex flex-col items-end justify-between gap-2.5 text-right self-start sm:self-center shrink-0">
-                              <div className="text-stone-400">
-                                <div>{new Date(order.created_at).toLocaleDateString()}</div>
-                                <div className="text-[11px] text-stone-500">
-                                  Downloads: {order.download_count || 0}
-                                </div>
-                              </div>
-                              <button
-                                type="button"
-                                onClick={() => setOrderToDelete(order)}
-                                className="inline-flex items-center gap-1 px-2.5 py-1 text-red-600 hover:bg-red-50 border border-red-200 rounded-lg text-xs font-semibold transition-colors cursor-pointer"
-                                title="Delete this order record"
-                              >
-                                <Trash2 className="w-3 h-3 text-red-500" />
-                                <span>Delete</span>
-                              </button>
-                            </div>
-                          </div>
-                        ))}
+                      {/* Orders Filter Tabs */}
+                      <div className="flex items-center gap-1.5 overflow-x-auto pb-1 text-xs">
+                        <button
+                          type="button"
+                          onClick={() => setOrderFilter('all')}
+                          className={`px-3 py-1.5 rounded-xl font-bold transition-colors cursor-pointer shrink-0 ${
+                            orderFilter === 'all'
+                              ? 'bg-[#5C715E] text-white shadow-xs'
+                              : 'bg-stone-100 text-stone-600 hover:bg-stone-200'
+                          }`}
+                        >
+                          All ({adminOrders.length})
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setOrderFilter('pending')}
+                          className={`px-3 py-1.5 rounded-xl font-bold transition-colors cursor-pointer shrink-0 flex items-center gap-1 ${
+                            orderFilter === 'pending'
+                              ? 'bg-amber-600 text-white shadow-xs'
+                              : 'bg-amber-50 text-amber-800 hover:bg-amber-100'
+                          }`}
+                        >
+                          <span>Pending ({adminOrders.filter((o) => o.status === 'pending_verification').length})</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setOrderFilter('paid')}
+                          className={`px-3 py-1.5 rounded-xl font-bold transition-colors cursor-pointer shrink-0 flex items-center gap-1 ${
+                            orderFilter === 'paid'
+                              ? 'bg-emerald-600 text-white shadow-xs'
+                              : 'bg-emerald-50 text-emerald-800 hover:bg-emerald-100'
+                          }`}
+                        >
+                          <span>Paid & Unlocked ({adminOrders.filter((o) => o.status === 'paid').length})</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setOrderFilter('rejected')}
+                          className={`px-3 py-1.5 rounded-xl font-bold transition-colors cursor-pointer shrink-0 flex items-center gap-1 ${
+                            orderFilter === 'rejected'
+                              ? 'bg-red-600 text-white shadow-xs'
+                              : 'bg-red-50 text-red-800 hover:bg-red-100'
+                          }`}
+                        >
+                          <span>Rejected ({adminOrders.filter((o) => o.status === 'rejected').length})</span>
+                        </button>
                       </div>
+
+                      {/* Full Orders History */}
+                      {(() => {
+                        const filtered = adminOrders.filter((o) => {
+                          if (orderFilter === 'pending') return o.status === 'pending_verification';
+                          if (orderFilter === 'paid') return o.status === 'paid';
+                          if (orderFilter === 'rejected') return o.status === 'rejected';
+                          return true;
+                        });
+
+                        if (filtered.length === 0) {
+                          return (
+                            <div className="p-8 bg-stone-50 rounded-2xl border border-stone-200 text-center text-xs text-stone-500">
+                              No orders found matching the selected filter ({orderFilter}).
+                            </div>
+                          );
+                        }
+
+                        return (
+                          <div className="divide-y divide-stone-100 border border-stone-200 rounded-2xl overflow-hidden text-xs bg-white">
+                            {filtered.map((order) => (
+                              <div key={order.id} className="p-4 flex flex-col sm:flex-row justify-between gap-3 hover:bg-stone-50/80 transition-colors">
+                                <div className="space-y-1">
+                                  <div className="flex items-center gap-2 flex-wrap">
+                                    <span className="font-bold text-[#2D3436] text-sm">
+                                      {order.customer_name}
+                                    </span>
+                                    <span
+                                      className={`px-2 py-0.5 rounded-md text-[10px] font-bold ${
+                                        order.status === 'paid'
+                                          ? 'bg-emerald-100 text-emerald-800'
+                                          : order.status === 'pending_verification'
+                                          ? 'bg-amber-100 text-amber-800 animate-pulse'
+                                          : order.status === 'rejected'
+                                          ? 'bg-red-100 text-red-800'
+                                          : 'bg-stone-100 text-stone-700'
+                                      }`}
+                                    >
+                                      {order.status === 'paid'
+                                        ? 'Paid & Verified'
+                                        : order.status === 'pending_verification'
+                                        ? 'Pending Verification'
+                                        : order.status === 'rejected'
+                                        ? 'Rejected (Locked)'
+                                        : order.status}
+                                    </span>
+                                    {order.payment_method && (
+                                      <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-stone-100 text-stone-600 uppercase">
+                                        {order.payment_method}
+                                      </span>
+                                    )}
+                                  </div>
+
+                                  <div className="text-stone-600">
+                                    <strong>Note:</strong> {order.note_title} • <strong>Amount:</strong> ₹{order.amount}
+                                  </div>
+                                  <div className="text-stone-500">
+                                    <span>{order.customer_email}</span>
+                                    {order.customer_phone && <span> • +91 {order.customer_phone}</span>}
+                                  </div>
+                                  <div className="flex items-center gap-2 flex-wrap text-[11px] font-mono text-stone-500 pt-0.5">
+                                    <span className="text-stone-400">ID: {order.id}</span>
+                                    {order.utr_number ? (
+                                      <span className="font-bold text-amber-800 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded text-[10px]">
+                                        UTR: {order.utr_number}
+                                      </span>
+                                    ) : (
+                                      <span className="text-stone-500 bg-stone-100 border border-stone-200 px-1.5 py-0.5 rounded text-[10px] font-sans">
+                                        No UTR
+                                      </span>
+                                    )}
+                                    {order.verified_via && (
+                                      <span className="font-bold text-emerald-800 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded text-[10px]">
+                                        Verified: {order.verified_via === 'gateway_webhook' ? 'Payment Gateway Webhook' : 'Admin Approved'}
+                                      </span>
+                                    )}
+                                    {order.transaction_log_id && (
+                                      <span className="text-stone-400 text-[10px]" title={order.transaction_log_id}>
+                                        Log: {order.transaction_log_id.substring(0, 16)}...
+                                      </span>
+                                    )}
+                                  </div>
+
+                                  {/* Rejection reason display if rejected */}
+                                  {order.status === 'rejected' && order.rejection_reason && (
+                                    <div className="p-2 bg-red-50/90 rounded-lg border border-red-200 text-red-800 text-[11px] font-sans">
+                                      <strong>Rejection Reason:</strong> {order.rejection_reason}
+                                    </div>
+                                  )}
+
+                                  {order.download_token && order.status === 'paid' && (
+                                    <div className="flex items-center gap-2 pt-1">
+                                      <a
+                                        href={`/api/view/${order.download_token}`}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="text-[11px] font-bold text-[#5C715E] hover:underline"
+                                      >
+                                        Preview Student PDF ↗
+                                      </a>
+                                      <span className="text-stone-300">•</span>
+                                      <a
+                                        href={`/api/download/${order.download_token}`}
+                                        className="text-[11px] font-bold text-stone-600 hover:text-stone-900 hover:underline"
+                                      >
+                                        Download File
+                                      </a>
+                                    </div>
+                                  )}
+
+                                  {order.status === 'pending_verification' && (
+                                    <div className="flex items-center gap-2 pt-2">
+                                      <button
+                                        type="button"
+                                        disabled={processingOrderId === order.id}
+                                        onClick={() => handleApproveOrder(order.id)}
+                                        className="inline-flex items-center gap-1.5 px-3 py-1 bg-[#5C715E] hover:bg-[#4A5D4E] text-white rounded-lg font-bold text-xs shadow-2xs transition-colors cursor-pointer disabled:opacity-50"
+                                      >
+                                        <CheckCircle2 className="w-3.5 h-3.5" />
+                                        <span>{processingOrderId === order.id ? 'Processing...' : 'Approve & Unlock PDF'}</span>
+                                      </button>
+                                      <button
+                                        type="button"
+                                        disabled={processingOrderId === order.id}
+                                        onClick={() => setOrderToReject(order)}
+                                        className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-white hover:bg-red-50 text-red-700 border border-red-200 rounded-lg font-semibold text-xs transition-colors cursor-pointer disabled:opacity-50"
+                                      >
+                                        <XCircle className="w-3.5 h-3.5" />
+                                        <span>Reject</span>
+                                      </button>
+                                    </div>
+                                  )}
+
+                                  {order.status === 'rejected' && (
+                                    <div className="pt-1">
+                                      <button
+                                        type="button"
+                                        disabled={processingOrderId === order.id}
+                                        onClick={() => handleApproveOrder(order.id)}
+                                        className="inline-flex items-center gap-1 text-[11px] font-bold text-[#5C715E] hover:underline cursor-pointer disabled:opacity-50"
+                                      >
+                                        <CheckCircle2 className="w-3.5 h-3.5" />
+                                        <span>Re-approve & Unlock PDF</span>
+                                      </button>
+                                    </div>
+                                  )}
+                                </div>
+
+                                <div className="flex flex-col items-end justify-between gap-2.5 text-right self-start sm:self-center shrink-0">
+                                  <div className="text-stone-400">
+                                    <div>{new Date(order.created_at).toLocaleDateString()}</div>
+                                    <div className="text-[11px] text-stone-500">
+                                      Downloads: {order.download_count || 0}
+                                    </div>
+                                  </div>
+                                  <button
+                                    type="button"
+                                    onClick={() => setOrderToDelete(order)}
+                                    className="inline-flex items-center gap-1 px-2.5 py-1 text-red-600 hover:bg-red-50 border border-red-200 rounded-lg text-xs font-semibold transition-colors cursor-pointer"
+                                    title="Delete this order record"
+                                  >
+                                    <Trash2 className="w-3 h-3 text-red-500" />
+                                    <span>Delete</span>
+                                  </button>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        );
+                      })()}
                     </div>
                   )}
                 </div>
@@ -1772,12 +1896,41 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                       </div>
                     </div>
 
+                    {/* Section 3: Admin Login Security PIN */}
+                    <div className="p-4 bg-stone-50 rounded-2xl border border-stone-200 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <label className="block text-xs font-bold text-stone-700 uppercase tracking-wider flex items-center gap-1.5">
+                          <ShieldCheck className="w-3.5 h-3.5 text-[#5C715E]" />
+                          <span>Admin Login Security PIN</span>
+                        </label>
+                        <button
+                          type="button"
+                          onClick={() => setShowSettingsPin(!showSettingsPin)}
+                          className="text-[11px] font-semibold text-[#5C715E] hover:underline cursor-pointer"
+                        >
+                          {showSettingsPin ? 'Hide PIN' : 'View PIN'}
+                        </button>
+                      </div>
+                      <input
+                        type={showSettingsPin ? "text" : "password"}
+                        placeholder="e.g. 8492"
+                        minLength={4}
+                        value={settingsAdminPin}
+                        onChange={(e) => setSettingsAdminPin(e.target.value)}
+                        className="w-full px-3.5 py-2 rounded-xl border border-stone-300 text-sm font-mono tracking-widest focus:outline-none focus:ring-2 focus:ring-[#5C715E] bg-white"
+                        required
+                      />
+                      <p className="text-[11px] text-stone-500">
+                        This is the PIN code required to open the Admin Panel and manage your store. Changing this and clicking Save will permanently update your admin access key.
+                      </p>
+                    </div>
+
                     <button
                       type="submit"
                       disabled={settingsSaving}
                       className="w-full py-3.5 bg-[#5C715E] hover:bg-[#4A5D4E] text-white rounded-xl font-bold text-sm shadow-md shadow-[#5C715E]/20 transition-all disabled:opacity-50 cursor-pointer"
                     >
-                      {settingsSaving ? 'Saving Profile & UPI ID...' : 'Save Profile & UPI Settings'}
+                      {settingsSaving ? 'Saving Profile, UPI & PIN...' : 'Save Profile, UPI & PIN'}
                     </button>
                   </form>
 
@@ -2092,6 +2245,94 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                     <>
                       <Trash2 className="w-3.5 h-3.5" />
                       <span>Yes, Delete</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* In-App Reject Order Modal with Reason Input */}
+        {orderToReject && (
+          <div
+            id="reject-order-modal"
+            className="fixed inset-0 z-[70] overflow-y-auto bg-stone-950/80 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-150"
+          >
+            <div className="bg-white rounded-3xl max-w-md w-full p-6 shadow-2xl border border-stone-200 text-center space-y-4 animate-in zoom-in-95 duration-150">
+              <div className="w-12 h-12 mx-auto rounded-2xl bg-red-100 text-red-600 flex items-center justify-center shadow-xs">
+                <XCircle className="w-6 h-6" />
+              </div>
+
+              <div className="space-y-1">
+                <h4 className="text-base font-extrabold text-[#2D3436]">Reject Payment Verification?</h4>
+                <p className="text-xs text-stone-600 leading-relaxed">
+                  Rejecting this order keeps the PDF locked for <strong>{orderToReject.customer_name}</strong>.
+                </p>
+                <div className="p-2.5 bg-stone-50 rounded-xl text-left text-xs font-mono space-y-0.5 border border-stone-200 mt-2">
+                  <div>Order: <strong className="text-stone-800">{orderToReject.id}</strong></div>
+                  <div>Note: <span className="text-stone-700 font-sans">{orderToReject.note_title}</span></div>
+                  <div>Amount: <strong className="text-[#5C715E]">₹{orderToReject.amount}</strong></div>
+                  {orderToReject.utr_number && <div>UTR: <strong>{orderToReject.utr_number}</strong></div>}
+                </div>
+              </div>
+
+              <div className="space-y-2 text-left">
+                <label className="text-xs font-bold text-stone-700 block">
+                  Rejection Reason (Shown to Student):
+                </label>
+                <div className="flex flex-wrap gap-1.5 pb-1">
+                  {[
+                    'Payment not received in account',
+                    'Incorrect transfer amount',
+                    'Duplicate request',
+                  ].map((preset) => (
+                    <button
+                      key={preset}
+                      type="button"
+                      onClick={() => setRejectReasonInput(preset)}
+                      className="px-2 py-1 bg-stone-100 hover:bg-stone-200 text-stone-700 text-[10px] rounded-lg font-medium transition-colors cursor-pointer"
+                    >
+                      {preset}
+                    </button>
+                  ))}
+                </div>
+                <input
+                  type="text"
+                  placeholder="e.g. Payment not received in UPI account"
+                  value={rejectReasonInput}
+                  onChange={(e) => setRejectReasonInput(e.target.value)}
+                  className="w-full px-3 py-2 text-xs rounded-xl border border-stone-300 focus:outline-none focus:ring-2 focus:ring-red-500 bg-white"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3 pt-2">
+                <button
+                  type="button"
+                  disabled={isSubmittingReject}
+                  onClick={() => {
+                    setOrderToReject(null);
+                    setRejectReasonInput('');
+                  }}
+                  className="py-2.5 px-3 rounded-xl border border-stone-300 text-stone-700 hover:bg-stone-100 text-xs font-bold transition-colors disabled:opacity-50 cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={isSubmittingReject}
+                  onClick={() => handleRejectOrder(orderToReject.id, rejectReasonInput)}
+                  className="py-2.5 px-3 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-bold transition-colors shadow-xs flex items-center justify-center gap-1.5 disabled:opacity-50 cursor-pointer"
+                >
+                  {isSubmittingReject ? (
+                    <>
+                      <Clock className="w-3.5 h-3.5 animate-spin" />
+                      <span>Rejecting...</span>
+                    </>
+                  ) : (
+                    <>
+                      <XCircle className="w-3.5 h-3.5" />
+                      <span>Confirm Rejection</span>
                     </>
                   )}
                 </button>

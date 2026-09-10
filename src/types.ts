@@ -21,8 +21,8 @@ export interface CreatorProfile {
   support_email: string;
   whatsapp_number?: string;
   upi_id?: string;
-  razorpay_key_id?: string;
-  payment_mode?: 'test' | 'live';
+  admin_pin?: string;
+  verification_mode?: 'manual' | 'instant';
 }
 
 export interface Order {
@@ -33,17 +33,44 @@ export interface Order {
   customer_email: string;
   customer_phone: string;
   amount: number;
-  status: 'created' | 'pending_verification' | 'paid' | 'failed' | 'rejected';
+  currency: string;
+  status: 'created' | 'pending' | 'pending_verification' | 'paid' | 'failed' | 'cancelled' | 'expired' | 'rejected';
   payment_id?: string;
   payment_method?: string;
+  payment_provider?: string;
   utr_number?: string;
   download_token?: string | null;
+  download_token_expires_at?: string | null;
   download_count: number;
   last_downloaded_at?: string;
   submitted_at?: string;
   paid_at?: string;
   approved_by?: string;
+  rejection_reason?: string;
+  rejected_at?: string;
+  transaction_log_id?: string;
+  verified_via?: string;
   created_at: string;
+}
+
+export interface TransactionLog {
+  id: string;
+  order_id: string;
+  transaction_id: string;
+  gateway: string;
+  event: string;
+  status: 'captured' | 'authorized' | 'verified' | 'success' | 'failed';
+  verified: boolean;
+  source: 'gateway_webhook' | 'admin_verified';
+  amount: number;
+  currency: string;
+  customer_email?: string;
+  customer_phone?: string;
+  received_at: string;
+  signature_verified?: boolean;
+  raw_event_id?: string;
+  verified_by?: string;
+  note?: string;
 }
 
 export interface CreateOrderRequest {

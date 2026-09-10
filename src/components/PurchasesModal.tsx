@@ -23,9 +23,9 @@ export const PurchasesModal: React.FC<PurchasesModalProps> = ({
 
   const handleLookup = async (e: React.FormEvent) => {
     e.preventDefault();
-    const cleanEmail = email.trim().toLowerCase();
-    if (!cleanEmail || !cleanEmail.includes('@')) {
-      setError('Please enter a valid email address.');
+    const cleanQuery = email.trim();
+    if (!cleanQuery) {
+      setError('Please enter your email address or Order ID.');
       return;
     }
 
@@ -33,7 +33,7 @@ export const PurchasesModal: React.FC<PurchasesModalProps> = ({
     setLoading(true);
 
     try {
-      const res = await fetch(`/api/purchases/lookup?email=${encodeURIComponent(cleanEmail)}`);
+      const res = await fetch(`/api/purchases/lookup?query=${encodeURIComponent(cleanQuery)}`);
       const data = await res.json();
 
       if (!res.ok) {
@@ -77,15 +77,15 @@ export const PurchasesModal: React.FC<PurchasesModalProps> = ({
         {/* Body */}
         <div className="p-5 sm:p-6 overflow-y-auto space-y-4">
           <p className="text-xs text-stone-600 leading-relaxed">
-            Enter the email address you used during checkout to retrieve your purchased physiotherapy notes and instant download links.
+            Enter the email address or Order ID you used during checkout to retrieve your purchased physiotherapy notes and instant download links.
           </p>
 
           {/* Search Form */}
           <form onSubmit={handleLookup} className="flex gap-2">
             <input
-              type="email"
+              type="text"
               required
-              placeholder="Enter your email address"
+              placeholder="Enter your email or Order ID (e.g. ord_...)"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               className="flex-1 px-3.5 py-2.5 rounded-xl border border-stone-300 text-sm focus:outline-none focus:ring-2 focus:ring-[#5C715E] bg-stone-50"

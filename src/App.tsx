@@ -17,7 +17,7 @@ export default function App() {
     instagram_url: 'https://instagram.com/restore_healthphysio',
     support_email: 'restorehealthphysio@gmail.com',
     whatsapp_number: '+91 83407 49923',
-    upi_id: 'kamranalam8340749923-1@okhdfcbank',
+    upi_id: 'restorehealthphysio@okaxis',
   });
 
   const [notes, setNotes] = useState<Note[]>([]);
@@ -26,6 +26,7 @@ export default function App() {
   // Modals state
   const [selectedNote, setSelectedNote] = useState<Note | null>(null);
   const [checkoutNote, setCheckoutNote] = useState<Note | null>(null);
+  const [initialOrderId, setInitialOrderId] = useState<string | null>(null);
   const [isPurchasesOpen, setIsPurchasesOpen] = useState(false);
   const [isAdminOpen, setIsAdminOpen] = useState(false);
 
@@ -90,6 +91,32 @@ export default function App() {
   useEffect(() => {
     fetchProfile();
     fetchNotes();
+
+    // Check if customer returned from UPI app with order_id in URL
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const orderIdParam = params.get('order_id');
+      if (orderIdParam) {
+        setInitialOrderId(orderIdParam);
+        fetch(`/api/orders/${orderIdParam}/status`)
+          .then((res) => res.json())
+          .then((orderData) => {
+            if (orderData && (orderData.note_id || orderData.note_title)) {
+              fetch('/api/notes')
+                .then((nRes) => nRes.json())
+                .then((notesList: Note[]) => {
+                  const target = notesList.find((n) => n.id === orderData.note_id || n.title === orderData.note_title) || notesList[0];
+                  if (target) {
+                    setCheckoutNote(target);
+                  }
+                });
+            }
+          })
+          .catch((err) => console.error('Error auto-loading return order:', err));
+      }
+    } catch (e) {
+      console.warn('URL params parsing failed:', e);
+    }
   }, []);
 
   const handleAdminLoginSuccess = (token: string) => {
@@ -195,7 +222,14 @@ export default function App() {
       {checkoutNote && (
         <CheckoutModal
           note={checkoutNote}
-          onClose={() => setCheckoutNote(null)}
+          initialOrderId={initialOrderId}
+          onClose={() => {
+            setCheckoutNote(null);
+            setInitialOrderId(null);
+            if (window.location.search.includes('order_id')) {
+              window.history.replaceState({}, document.title, window.location.pathname);
+            }
+          }}
         />
       )}
 
