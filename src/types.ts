@@ -9,6 +9,7 @@ export interface Note {
   pdf_original_name: string;
   pdf_size: number; // In bytes
   published: boolean;
+  drive_url?: string; // Optional Google Drive / Cloud storage direct download URL
   created_at: string;
   updated_at: string;
 }

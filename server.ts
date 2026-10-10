@@ -15,6 +15,15 @@ import {
   getSignedPdfUrl,
   getSupabaseHealthStatus,
 } from "./server/supabase";
+import {
+  isFirebaseConfigured,
+  fetchAllNotesFromFirestore,
+  saveNoteToFirestore,
+  deleteNoteFromFirestore,
+  syncAllNotesToFirestore,
+  saveOrderToFirestore,
+  getFirebaseHealth,
+} from "./server/firebase";
 
 const app = express();
 
@@ -24,8 +33,9 @@ const UPLOADS_DIR = path.join(process.cwd(), "uploads");
 const COVERS_DIR = path.join(UPLOADS_DIR, "covers");
 const PRIVATE_PDFS_DIR = path.join(UPLOADS_DIR, "private_pdfs");
 const SCREENSHOTS_DIR = path.join(UPLOADS_DIR, "screenshots");
+const CHUNKS_DIR = path.join(UPLOADS_DIR, "chunks");
 
-for (const dir of [DATA_DIR, UPLOADS_DIR, COVERS_DIR, PRIVATE_PDFS_DIR, SCREENSHOTS_DIR]) {
+for (const dir of [DATA_DIR, UPLOADS_DIR, COVERS_DIR, PRIVATE_PDFS_DIR, SCREENSHOTS_DIR, CHUNKS_DIR]) {
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
@@ -33,13 +43,33 @@ for (const dir of [DATA_DIR, UPLOADS_DIR, COVERS_DIR, PRIVATE_PDFS_DIR, SCREENSH
 
 // Data file paths
 const NOTES_FILE = path.join(DATA_DIR, "notes.json");
+const NOTES_BACKUP_FILE = path.join(DATA_DIR, "notes_backup.json");
 const ORDERS_FILE = path.join(DATA_DIR, "orders.json");
 const SETTINGS_FILE = path.join(DATA_DIR, "settings.json");
 const TRANSACTION_LOGS_FILE = path.join(DATA_DIR, "transaction_logs.json");
 
 // Ensure data files exist with default empty states (ZERO preloaded products)
 if (!fs.existsSync(NOTES_FILE)) {
-  fs.writeFileSync(NOTES_FILE, JSON.stringify([], null, 2));
+  if (fs.existsSync(NOTES_BACKUP_FILE)) {
+    try {
+      const backupData = fs.readFileSync(NOTES_BACKUP_FILE, "utf-8");
+      fs.writeFileSync(NOTES_FILE, backupData);
+    } catch (e) {
+      fs.writeFileSync(NOTES_FILE, JSON.stringify([], null, 2));
+    }
+  } else {
+    fs.writeFileSync(NOTES_FILE, JSON.stringify([], null, 2));
+  }
+} else if (fs.existsSync(NOTES_BACKUP_FILE)) {
+  // If notes_backup has more notes than notes.json (e.g. after container refresh), recover automatically
+  try {
+    const cur = JSON.parse(fs.readFileSync(NOTES_FILE, "utf-8"));
+    const bkp = JSON.parse(fs.readFileSync(NOTES_BACKUP_FILE, "utf-8"));
+    if (Array.isArray(bkp) && Array.isArray(cur) && bkp.length > cur.length) {
+      fs.writeFileSync(NOTES_FILE, JSON.stringify(bkp, null, 2));
+      console.log(`[DATA RECOVERY] Automatically restored ${bkp.length} notes from notes_backup.json`);
+    }
+  } catch (e) {}
 }
 
 if (!fs.existsSync(ORDERS_FILE)) {
@@ -61,6 +91,31 @@ if (!fs.existsSync(SETTINGS_FILE)) {
     admin_pin: process.env.ADMIN_PASSWORD || "1234"
   };
   fs.writeFileSync(SETTINGS_FILE, JSON.stringify(defaultSettings, null, 2));
+}
+
+// Automatically sync notes with Firestore cloud database on boot
+if (isFirebaseConfigured()) {
+  fetchAllNotesFromFirestore().then((fbNotes) => {
+    if (Array.isArray(fbNotes) && fbNotes.length > 0) {
+      const curNotes = readJSON<any[]>(NOTES_FILE, []);
+      if (fbNotes.length >= curNotes.length) {
+        writeJSON(NOTES_FILE, fbNotes);
+        writeJSON(NOTES_BACKUP_FILE, fbNotes);
+        console.log(`[FIREBASE AUTO-SYNC] Restored ${fbNotes.length} notes from Firestore cloud storage.`);
+      } else if (curNotes.length > fbNotes.length) {
+        syncAllNotesToFirestore(curNotes).catch(() => {});
+      }
+    } else {
+      const curNotes = readJSON<any[]>(NOTES_FILE, []);
+      if (curNotes.length > 0) {
+        syncAllNotesToFirestore(curNotes).then(() => {
+          console.log(`[FIREBASE INITIAL SEED] Seeded ${curNotes.length} notes to Firestore cloud.`);
+        }).catch(() => {});
+      }
+    }
+  }).catch((err) => {
+    console.error("[FIREBASE SYNC]", err?.message || err);
+  });
 }
 
 function dedupeById<T>(items: T): T {
@@ -98,6 +153,11 @@ function writeJSON<T>(file: string, data: T): void {
   try {
     const cleanData = dedupeById(data);
     fs.writeFileSync(file, JSON.stringify(cleanData, null, 2), "utf-8");
+    if (file === NOTES_FILE) {
+      try {
+        fs.writeFileSync(NOTES_BACKUP_FILE, JSON.stringify(cleanData, null, 2), "utf-8");
+      } catch (be) {}
+    }
   } catch (err) {
     console.error(`Error writing ${file}:`, err);
   }
@@ -419,12 +479,22 @@ function verifyPdfAccessMiddleware(req: Request, res: Response, next: NextFuncti
   const notes = readJSON<any[]>(NOTES_FILE, []);
   const note = notes.find((n) => n.id === order.note_id);
 
-  if (!note || !note.pdf_file) {
+  if (!note || (!note.pdf_file && !note.drive_url)) {
     return res.status(404).send("The requested PDF file is not available on the server.");
   }
 
-  const filePath = path.join(PRIVATE_PDFS_DIR, note.pdf_file);
-  if (!fs.existsSync(filePath)) {
+  const filePath = note.pdf_file ? path.join(PRIVATE_PDFS_DIR, note.pdf_file) : "";
+  const hasLocalFile = filePath && fs.existsSync(filePath);
+
+  if (!hasLocalFile && note.drive_url) {
+    (req as any).verifiedOrder = order;
+    (req as any).verifiedNote = note;
+    (req as any).verifiedLog = matchingLog;
+    (req as any).isDriveRedirect = true;
+    return next();
+  }
+
+  if (!hasLocalFile) {
     return res.status(404).send("File not found on storage. Please contact the creator.");
   }
 
@@ -1228,6 +1298,9 @@ app.post("/api/checkout/submit-upi-payment", upload.single("screenshot"), async 
     console.log("[SUPABASE SYNC] Note on payment submission:", sbErr?.message || sbErr);
   }
 
+  // Sync to Firestore
+  saveOrderToFirestore(order).catch(() => {});
+
   return res.json({
     success: true,
     status: "pending_verification",
@@ -1366,6 +1439,8 @@ function streamPdfWithRanges(req: Request, res: Response, filePath: string, file
 // 8. Protected PDF Download (Protected by Server-Side Verification Middleware)
 app.get("/api/download/:token", verifyPdfAccessMiddleware, (req, res) => {
   const order = (req as any).verifiedOrder;
+  const note = (req as any).verifiedNote;
+  const isDrive = (req as any).isDriveRedirect;
   const filePath = (req as any).pdfFilePath;
   const filename = (req as any).pdfFilename;
 
@@ -1378,14 +1453,24 @@ app.get("/api/download/:token", verifyPdfAccessMiddleware, (req, res) => {
     writeJSON(ORDERS_FILE, orders);
   }
 
+  if (isDrive && note?.drive_url) {
+    return res.redirect(note.drive_url);
+  }
+
   // Stream PDF with HTTP Range and Content-Length support
   streamPdfWithRanges(req, res, filePath, filename, true);
 });
 
 // 9. Protected PDF In-Browser Viewing (Protected by Server-Side Verification Middleware)
 app.get("/api/view/:token", verifyPdfAccessMiddleware, (req, res) => {
+  const note = (req as any).verifiedNote;
+  const isDrive = (req as any).isDriveRedirect;
   const filePath = (req as any).pdfFilePath;
   const filename = (req as any).pdfFilename;
+
+  if (isDrive && note?.drive_url) {
+    return res.redirect(note.drive_url);
+  }
 
   // Stream PDF with HTTP Range and inline viewer headers
   streamPdfWithRanges(req, res, filePath, filename, false);
@@ -1529,46 +1614,52 @@ app.post("/api/admin/logout", (req, res) => {
 });
 
 // Admin: Chunk Upload Session Management (High-Speed Multi-Part Streaming up to 3 GB)
-interface ChunkUploadSession {
+interface ChunkUploadMeta {
   uploadId: string;
   originalName: string;
   fileSize: number;
   totalChunks: number;
   chunkSize: number;
-  tempFilePath: string;
-  uploadedChunks: Set<number>;
-  receivedBytes: number;
   createdAt: number;
   lastActiveAt: number;
 }
 
-const chunkUploadSessions = new Map<string, ChunkUploadSession>();
-
-// Cleanup stale chunk sessions older than 2 hours every 30 minutes
+// Cleanup stale chunk directories older than 2 hours every 30 minutes
 setInterval(() => {
   const now = Date.now();
   const twoHours = 2 * 60 * 60 * 1000;
-  for (const [id, session] of chunkUploadSessions.entries()) {
-    if (now - session.lastActiveAt > twoHours) {
-      if (fs.existsSync(session.tempFilePath)) {
-        try { fs.unlinkSync(session.tempFilePath); } catch (e) {}
-      }
-      chunkUploadSessions.delete(id);
-    }
-  }
   try {
-    const files = fs.readdirSync(PRIVATE_PDFS_DIR);
-    for (const f of files) {
-      if (f.endsWith(".tmp")) {
-        const full = path.join(PRIVATE_PDFS_DIR, f);
-        const stat = fs.statSync(full);
-        if (now - stat.mtimeMs > twoHours) {
-          try { fs.unlinkSync(full); } catch (e) {}
-        }
+    if (fs.existsSync(CHUNKS_DIR)) {
+      const dirs = fs.readdirSync(CHUNKS_DIR);
+      for (const d of dirs) {
+        const fullDir = path.join(CHUNKS_DIR, d);
+        try {
+          const stat = fs.statSync(fullDir);
+          if (now - stat.mtimeMs > twoHours) {
+            fs.rmSync(fullDir, { recursive: true, force: true });
+          }
+        } catch (e) {}
       }
     }
   } catch (e) {}
 }, 30 * 60 * 1000);
+
+// Helper to get chunk session directory & metadata
+function getChunkSessionDir(uploadId: string): string {
+  const cleanId = path.basename(uploadId);
+  return path.join(CHUNKS_DIR, cleanId);
+}
+
+function readChunkMeta(uploadId: string): ChunkUploadMeta | null {
+  try {
+    const dir = getChunkSessionDir(uploadId);
+    const metaPath = path.join(dir, "meta.json");
+    if (!fs.existsSync(metaPath)) return null;
+    return JSON.parse(fs.readFileSync(metaPath, "utf-8"));
+  } catch (e) {
+    return null;
+  }
+}
 
 // Admin: 1. Initialize Chunk Upload Session
 app.post("/api/admin/upload-chunk/init", requireAdmin, (req, res) => {
@@ -1589,32 +1680,27 @@ app.post("/api/admin/upload-chunk/init", requireAdmin, (req, res) => {
     }
 
     const uploadId = "up_" + Date.now() + "_" + crypto.randomBytes(6).toString("hex");
-    const tempFilePath = path.join(PRIVATE_PDFS_DIR, `${uploadId}.tmp`);
+    const sessionDir = getChunkSessionDir(uploadId);
+    fs.mkdirSync(sessionDir, { recursive: true });
 
-    // Initialize clean empty temp file
-    fs.writeFileSync(tempFilePath, Buffer.alloc(0));
-
-    const session: ChunkUploadSession = {
+    const meta: ChunkUploadMeta = {
       uploadId,
       originalName: String(filename).trim(),
       fileSize: numericSize,
       totalChunks: Number(totalChunks),
       chunkSize: Number(chunkSize),
-      tempFilePath,
-      uploadedChunks: new Set<number>(),
-      receivedBytes: 0,
       createdAt: Date.now(),
       lastActiveAt: Date.now(),
     };
 
-    chunkUploadSessions.set(uploadId, session);
-    console.log(`[CHUNK UPLOAD] Initialized fast session ${uploadId} for "${session.originalName}" (${(numericSize / (1024 * 1024)).toFixed(1)} MB in ${totalChunks} chunks)`);
+    fs.writeFileSync(path.join(sessionDir, "meta.json"), JSON.stringify(meta, null, 2), "utf-8");
+    console.log(`[CHUNK UPLOAD] Initialized persistent fast session ${uploadId} for "${meta.originalName}" (${(numericSize / (1024 * 1024)).toFixed(1)} MB in ${totalChunks} chunks)`);
 
     res.json({
       success: true,
       uploadId,
-      chunkSize: session.chunkSize,
-      totalChunks: session.totalChunks,
+      chunkSize: meta.chunkSize,
+      totalChunks: meta.totalChunks,
     });
   } catch (err: any) {
     console.error("[CHUNK UPLOAD] Init error:", err);
@@ -1622,27 +1708,52 @@ app.post("/api/admin/upload-chunk/init", requireAdmin, (req, res) => {
   }
 });
 
-// Admin: 2. Stream Binary Chunk directly to file offset (Zero RAM overhead, random-access write)
+// Admin: 1b. Check Chunk Upload Status (Enables seamless resume if connection drops)
+app.get("/api/admin/upload-chunk/:uploadId/status", requireAdmin, (req, res) => {
+  const { uploadId } = req.params;
+  const meta = readChunkMeta(uploadId);
+  if (!meta) {
+    return res.status(404).json({ error: "Upload session not found or expired." });
+  }
+
+  const sessionDir = getChunkSessionDir(uploadId);
+  const uploadedChunks: number[] = [];
+  try {
+    const files = fs.readdirSync(sessionDir);
+    for (const f of files) {
+      if (f.startsWith("part_") && f.endsWith(".bin")) {
+        const idx = parseInt(f.replace("part_", "").replace(".bin", ""), 10);
+        if (!isNaN(idx)) uploadedChunks.push(idx);
+      }
+    }
+  } catch (e) {}
+
+  res.json({
+    success: true,
+    uploadId,
+    totalChunks: meta.totalChunks,
+    uploadedChunks: uploadedChunks.sort((a, b) => a - b),
+    chunkSize: meta.chunkSize,
+    fileSize: meta.fileSize,
+  });
+});
+
+// Admin: 2. Stream Binary Chunk directly to dedicated part file (Zero RAM overhead, immune to race conditions)
 app.post("/api/admin/upload-chunk/:uploadId", requireAdmin, (req, res) => {
   const { uploadId } = req.params;
-  const session = chunkUploadSessions.get(uploadId);
-  if (!session) {
+  const meta = readChunkMeta(uploadId);
+  if (!meta) {
     return res.status(404).json({ error: "Upload session not found or expired." });
   }
 
   const chunkIndex = parseInt(req.headers["x-chunk-index"] as string, 10);
-  const chunkOffset = parseInt(req.headers["x-chunk-offset"] as string, 10);
-
-  if (isNaN(chunkIndex) || isNaN(chunkOffset)) {
-    return res.status(400).json({ error: "Missing x-chunk-index or x-chunk-offset header." });
+  if (isNaN(chunkIndex) || chunkIndex < 0 || chunkIndex >= meta.totalChunks) {
+    return res.status(400).json({ error: "Invalid x-chunk-index header." });
   }
 
-  session.lastActiveAt = Date.now();
-
-  const writeStream = fs.createWriteStream(session.tempFilePath, {
-    flags: "r+",
-    start: chunkOffset,
-  });
+  const sessionDir = getChunkSessionDir(uploadId);
+  const partPath = path.join(sessionDir, `part_${chunkIndex}.bin`);
+  const writeStream = fs.createWriteStream(partPath);
 
   let bytesReceived = 0;
   req.on("data", (chunk: Buffer) => {
@@ -1665,64 +1776,80 @@ app.post("/api/admin/upload-chunk/:uploadId", requireAdmin, (req, res) => {
   });
 
   writeStream.on("finish", () => {
-    session.uploadedChunks.add(chunkIndex);
-    session.receivedBytes = Math.min(session.fileSize, session.receivedBytes + bytesReceived);
-    session.lastActiveAt = Date.now();
+    // Touch session dir mtime to keep active
+    try {
+      const now = new Date();
+      fs.utimesSync(sessionDir, now, now);
+    } catch (e) {}
 
     res.json({
       success: true,
       chunkIndex,
-      uploadedCount: session.uploadedChunks.size,
-      totalChunks: session.totalChunks,
-      receivedBytes: session.receivedBytes,
-      percent: Math.round((session.uploadedChunks.size / session.totalChunks) * 100),
+      receivedBytes: bytesReceived,
     });
   });
 
   req.pipe(writeStream);
 });
 
-// Admin: 3. Assemble and Finalize Fast Upload Session
-app.post("/api/admin/upload-chunk/:uploadId/complete", requireAdmin, (req, res) => {
+// Admin: 3. Assemble and Finalize Fast Upload Session with Stream Piping
+app.post("/api/admin/upload-chunk/:uploadId/complete", requireAdmin, async (req, res) => {
   try {
     const { uploadId } = req.params;
-    const session = chunkUploadSessions.get(uploadId);
-    if (!session) {
+    const meta = readChunkMeta(uploadId);
+    if (!meta) {
       return res.status(404).json({ error: "Upload session not found or expired." });
     }
 
-    if (!fs.existsSync(session.tempFilePath)) {
-      chunkUploadSessions.delete(uploadId);
-      return res.status(400).json({ error: "Temporary upload file is missing." });
-    }
+    const sessionDir = getChunkSessionDir(uploadId);
 
-    // Verify all chunks received
-    if (session.uploadedChunks.size < session.totalChunks) {
-      return res.status(400).json({
-        error: `Upload incomplete: received ${session.uploadedChunks.size} of ${session.totalChunks} chunks.`,
-      });
-    }
-
-    const stat = fs.statSync(session.tempFilePath);
-    if (stat.size !== session.fileSize) {
-      return res.status(400).json({
-        error: `File size mismatch: expected ${session.fileSize} bytes, got ${stat.size} bytes.`,
-      });
+    // Verify all chunk part files exist
+    for (let i = 0; i < meta.totalChunks; i++) {
+      const partPath = path.join(sessionDir, `part_${i}.bin`);
+      if (!fs.existsSync(partPath)) {
+        return res.status(400).json({
+          error: `Upload incomplete: chunk ${i} is missing. Please retry upload.`,
+        });
+      }
     }
 
     const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
     const finalFilename = `pdf-${uniqueSuffix}.pdf`;
     const finalPath = path.join(PRIVATE_PDFS_DIR, finalFilename);
 
-    fs.renameSync(session.tempFilePath, finalPath);
-    chunkUploadSessions.delete(uploadId);
+    const outStream = fs.createWriteStream(finalPath);
+
+    // Stream each part sequentially to avoid buffering in memory
+    for (let i = 0; i < meta.totalChunks; i++) {
+      const partPath = path.join(sessionDir, `part_${i}.bin`);
+      await new Promise<void>((resolve, reject) => {
+        const inStream = fs.createReadStream(partPath);
+        inStream.on("error", reject);
+        inStream.on("end", resolve);
+        inStream.pipe(outStream, { end: false });
+      });
+    }
+
+    outStream.end();
+
+    await new Promise<void>((resolve, reject) => {
+      outStream.on("finish", resolve);
+      outStream.on("error", reject);
+    });
+
+    const stat = fs.statSync(finalPath);
+
+    // Clean up temporary session directory
+    try {
+      fs.rmSync(sessionDir, { recursive: true, force: true });
+    } catch (e) {}
 
     console.log(`[CHUNK UPLOAD COMPLETE] Assembled 3GB-ready PDF: ${finalFilename} (${(stat.size / (1024 * 1024)).toFixed(1)} MB)`);
 
     res.json({
       success: true,
       pdf_file: finalFilename,
-      pdf_original_name: session.originalName,
+      pdf_original_name: meta.originalName,
       pdf_size: stat.size,
     });
   } catch (err: any) {
@@ -1734,14 +1861,60 @@ app.post("/api/admin/upload-chunk/:uploadId/complete", requireAdmin, (req, res) 
 // Admin: 4. Abort / Cancel Chunk Upload Session
 app.post("/api/admin/upload-chunk/:uploadId/abort", requireAdmin, (req, res) => {
   const { uploadId } = req.params;
-  const session = chunkUploadSessions.get(uploadId);
-  if (session) {
-    if (fs.existsSync(session.tempFilePath)) {
-      try { fs.unlinkSync(session.tempFilePath); } catch (e) {}
+  const sessionDir = getChunkSessionDir(uploadId);
+  try {
+    if (fs.existsSync(sessionDir)) {
+      fs.rmSync(sessionDir, { recursive: true, force: true });
     }
-    chunkUploadSessions.delete(uploadId);
-  }
+  } catch (e) {}
   res.json({ success: true, message: "Upload session aborted and cleaned up." });
+});
+
+// Admin: 5. Backup & Restore Notes (Guarantees zero data loss across container lifecycles)
+app.get("/api/admin/backup-notes", requireAdmin, (req, res) => {
+  const notes = readJSON<any[]>(NOTES_FILE, []);
+  const settings = readJSON<any>(SETTINGS_FILE, {});
+  res.setHeader("Content-Disposition", `attachment; filename="medicosminds-notes-backup-${new Date().toISOString().slice(0, 10)}.json"`);
+  res.setHeader("Content-Type", "application/json");
+  res.json({
+    version: 1,
+    exported_at: new Date().toISOString(),
+    store_name: settings.name || "MEDICOS⛑️MINDS",
+    total_notes: notes.length,
+    notes,
+  });
+});
+
+app.post("/api/admin/restore-notes", requireAdmin, (req, res) => {
+  try {
+    const { notes } = req.body || {};
+    if (!Array.isArray(notes)) {
+      return res.status(400).json({ error: "Invalid backup format: 'notes' array is required." });
+    }
+
+    const currentNotes = readJSON<any[]>(NOTES_FILE, []);
+    const existingIds = new Set(currentNotes.map((n) => n.id));
+
+    let restoredCount = 0;
+    for (const note of notes) {
+      if (note && note.title) {
+        if (!existingIds.has(note.id)) {
+          currentNotes.push(note);
+          existingIds.add(note.id);
+          restoredCount++;
+        }
+      }
+    }
+
+    writeJSON(NOTES_FILE, currentNotes);
+    writeJSON(NOTES_BACKUP_FILE, currentNotes);
+    syncAllNotesToFirestore(currentNotes).catch(() => {});
+    console.log(`[ADMIN RESTORE] Restored ${restoredCount} notes from backup. Total notes: ${currentNotes.length}`);
+    res.json({ success: true, restored_count: restoredCount, total_notes: currentNotes.length });
+  } catch (err: any) {
+    console.error("Restore error:", err);
+    res.status(500).json({ error: err.message || "Failed to restore backup." });
+  }
 });
 
 // Admin: Get all notes (including unpublished)
@@ -1793,8 +1966,12 @@ app.post(
         finalPdfFilename = pdfFile.filename;
         finalPdfOriginalName = pdfFile.originalname;
         finalPdfSize = pdfFile.size;
+      } else if (req.body.drive_url) {
+        finalPdfFilename = "";
+        finalPdfOriginalName = "Cloud_Document.pdf";
+        finalPdfSize = 0;
       } else {
-        return res.status(400).json({ error: "Please upload a PDF file for this note." });
+        return res.status(400).json({ error: "Please upload a PDF file or provide a cloud link for this note." });
       }
 
       const previewImages: string[] = [];
@@ -1816,6 +1993,7 @@ app.post(
         pdf_file: finalPdfFilename,
         pdf_original_name: finalPdfOriginalName,
         pdf_size: finalPdfSize,
+        drive_url: req.body.drive_url ? String(req.body.drive_url).trim() : undefined,
         published: published === "true" || published === true,
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
@@ -1829,6 +2007,9 @@ app.post(
       saveProduct(newNote, false).catch((err) => {
         console.log("[SUPABASE PRODUCT SYNC] Note create fallback:", err?.message || err);
       });
+
+      // Mirror to Firestore Cloud
+      saveNoteToFirestore(newNote).catch(() => {});
 
       res.status(201).json(newNote);
     } catch (err: any) {
@@ -1991,6 +2172,7 @@ app.put(
         pdf_file: newPdfFilename,
         pdf_original_name: newPdfOriginalName,
         pdf_size: newPdfSize,
+        drive_url: req.body.drive_url !== undefined ? String(req.body.drive_url).trim() : existingNote.drive_url,
         updated_at: new Date().toISOString(),
       };
 
@@ -2001,6 +2183,9 @@ app.put(
       saveProduct(updatedNote, true).catch((err) => {
         console.log("[SUPABASE PRODUCT SYNC] Note update fallback:", err?.message || err);
       });
+
+      // Mirror to Firestore Cloud
+      saveNoteToFirestore(updatedNote).catch(() => {});
 
       res.json(updatedNote);
     } catch (err: any) {
@@ -2028,6 +2213,9 @@ app.delete("/api/admin/notes/:id", requireAdmin, (req, res) => {
   deleteProduct(id).catch((err) => {
     console.log("[SUPABASE PRODUCT DELETE] Fallback:", err?.message || err);
   });
+
+  // Mirror deletion to Firestore Cloud
+  deleteNoteFromFirestore(id).catch(() => {});
 
   // Clean up PDF file
   if (deletedNote.pdf_file) {
@@ -2337,6 +2525,16 @@ app.get("/api/admin/supabase-status", requireAdmin, async (req, res) => {
     });
   } catch (err: any) {
     res.status(500).json({ error: err?.message || "Failed to check Supabase status" });
+  }
+});
+
+// Admin: Firebase Firestore Cloud Status Endpoint
+app.get("/api/admin/firebase-status", requireAdmin, async (_req, res) => {
+  try {
+    const status = await getFirebaseHealth();
+    res.json(status);
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || "Failed to check Firebase status" });
   }
 });
 

@@ -1,0 +1,193 @@
+{
+  "entities": {
+    "Note": {
+      "title": "Note",
+      "description": "Educational study notes and digital guides published for students.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique identifier for the note.",
+          "maxLength": 128
+        },
+        "title": {
+          "type": "string",
+          "description": "Title of the study guide.",
+          "maxLength": 200
+        },
+        "description": {
+          "type": "string",
+          "description": "Detailed description of the note contents.",
+          "maxLength": 5000
+        },
+        "price": {
+          "type": "number",
+          "description": "Price in INR (₹)."
+        },
+        "drive_url": {
+          "type": "string",
+          "description": "Permanent Google Drive or cloud PDF link.",
+          "maxLength": 2048
+        },
+        "cover_image": {
+          "type": "string",
+          "description": "Cover thumbnail image URL.",
+          "maxLength": 2048
+        },
+        "pdf_file": {
+          "type": "string",
+          "description": "Stored PDF filename or identifier.",
+          "maxLength": 256
+        },
+        "pdf_original_name": {
+          "type": "string",
+          "description": "Original file name of the PDF.",
+          "maxLength": 256
+        },
+        "pdf_size": {
+          "type": "number",
+          "description": "Size of PDF in bytes."
+        },
+        "published": {
+          "type": "boolean",
+          "description": "Whether the note is published to students."
+        },
+        "created_at": {
+          "type": "string",
+          "description": "ISO timestamp of creation.",
+          "maxLength": 64
+        },
+        "updated_at": {
+          "type": "string",
+          "description": "ISO timestamp of last update.",
+          "maxLength": 64
+        }
+      },
+      "required": ["id", "title", "price", "published"]
+    },
+    "Order": {
+      "title": "Order",
+      "description": "Student purchase record and payment status.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique order identifier.",
+          "maxLength": 128
+        },
+        "note_id": {
+          "type": "string",
+          "description": "ID of the purchased note.",
+          "maxLength": 128
+        },
+        "note_title": {
+          "type": "string",
+          "description": "Title of the note at time of checkout.",
+          "maxLength": 200
+        },
+        "amount": {
+          "type": "number",
+          "description": "Transaction amount in INR (₹)."
+        },
+        "customer_name": {
+          "type": "string",
+          "description": "Name of the student buyer.",
+          "maxLength": 150
+        },
+        "customer_email": {
+          "type": "string",
+          "description": "Email address for delivery.",
+          "maxLength": 200
+        },
+        "customer_phone": {
+          "type": "string",
+          "description": "Mobile number.",
+          "maxLength": 30
+        },
+        "utr_number": {
+          "type": "string",
+          "description": "UPI transaction reference ID (UTR).",
+          "maxLength": 64
+        },
+        "status": {
+          "type": "string",
+          "description": "Payment verification status.",
+          "enum": ["initiated", "pending_verification", "approved", "rejected"]
+        },
+        "payment_method": {
+          "type": "string",
+          "description": "Method of payment (UPI).",
+          "maxLength": 50
+        },
+        "created_at": {
+          "type": "string",
+          "description": "Timestamp of order creation.",
+          "maxLength": 64
+        },
+        "updated_at": {
+          "type": "string",
+          "description": "Timestamp of order update.",
+          "maxLength": 64
+        }
+      },
+      "required": ["id", "note_id", "amount", "customer_name", "status"]
+    },
+    "StoreSettings": {
+      "title": "StoreSettings",
+      "description": "Creator profile and store payment settings.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Store name.",
+          "maxLength": 100
+        },
+        "bio": {
+          "type": "string",
+          "description": "Short bio or tagline.",
+          "maxLength": 500
+        },
+        "instagram_handle": {
+          "type": "string",
+          "description": "Instagram handle.",
+          "maxLength": 100
+        },
+        "instagram_url": {
+          "type": "string",
+          "description": "Instagram profile link.",
+          "maxLength": 256
+        },
+        "upi_id": {
+          "type": "string",
+          "description": "UPI ID to receive student payments.",
+          "maxLength": 100
+        },
+        "whatsapp_number": {
+          "type": "string",
+          "description": "Support WhatsApp contact.",
+          "maxLength": 30
+        },
+        "support_email": {
+          "type": "string",
+          "description": "Support email address.",
+          "maxLength": 150
+        }
+      },
+      "required": ["name"]
+    }
+  },
+  "firestore": {
+    "/notes/{noteId}": {
+      "schema": { "$ref": "#/entities/Note" },
+      "description": "Collection of educational study notes available in the store."
+    },
+    "/orders/{orderId}": {
+      "schema": { "$ref": "#/entities/Order" },
+      "description": "Purchased orders placed by students."
+    },
+    "/settings/store": {
+      "schema": { "$ref": "#/entities/StoreSettings" },
+      "description": "Global store configuration and creator settings."
+    }
+  }
+}

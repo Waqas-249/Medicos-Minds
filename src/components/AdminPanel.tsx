@@ -76,8 +76,12 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   const [formTitle, setFormTitle] = useState('');
   const [formPrice, setFormPrice] = useState('');
   const [formDescription, setFormDescription] = useState('');
+  const [formDriveUrl, setFormDriveUrl] = useState('');
   const [formPublished, setFormPublished] = useState(true);
   const [selectedPdf, setSelectedPdf] = useState<File | null>(null);
+
+  // Local Browser Notes Safety Cache
+  const [cachedNotesAvailable, setCachedNotesAvailable] = useState<number>(0);
 
   // Fast Chunked PDF Upload State (Streaming up to 3 GB)
   const [chunkUploadProgress, setChunkUploadProgress] = useState<ChunkUploadProgress | null>(null);
@@ -142,8 +146,9 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   const [showClearOrdersModal, setShowClearOrdersModal] = useState(false);
   const [isClearingOrders, setIsClearingOrders] = useState(false);
 
-  // Supabase Status State
+  // Database Status State
   const [supabaseStatus, setSupabaseStatus] = useState<any | null>(null);
+  const [firebaseStatus, setFirebaseStatus] = useState<any | null>(null);
   const [copiedSchema, setCopiedSchema] = useState(false);
 
   const pdfInputRef = useRef<HTMLInputElement>(null);
@@ -168,7 +173,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     if (!adminToken) return;
     setLoadingData(true);
     try {
-      const [notesRes, ordersRes, settingsRes, supabaseRes] = await Promise.all([
+      const [notesRes, ordersRes, settingsRes, supabaseRes, firebaseRes] = await Promise.all([
         fetch('/api/admin/notes', {
           headers: { Authorization: `Bearer ${adminToken}` },
         }),
@@ -181,6 +186,9 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
         fetch('/api/admin/supabase-status', {
           headers: { Authorization: `Bearer ${adminToken}` },
         }).catch(() => null),
+        fetch('/api/admin/firebase-status', {
+          headers: { Authorization: `Bearer ${adminToken}` },
+        }).catch(() => null),
       ]);
 
       if (notesRes.ok) {
@@ -189,6 +197,21 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
           ? Array.from(new Map(notesData.map((item: Note) => [item.id, item])).values())
           : [];
         setAdminNotes(uniqueNotes);
+
+        try {
+          if (uniqueNotes.length > 1) {
+            localStorage.setItem('medicosminds_admin_notes_backup', JSON.stringify(uniqueNotes));
+            setCachedNotesAvailable(0);
+          } else {
+            const cachedStr = localStorage.getItem('medicosminds_admin_notes_backup');
+            if (cachedStr) {
+              const cached = JSON.parse(cachedStr);
+              if (Array.isArray(cached) && cached.length > uniqueNotes.length) {
+                setCachedNotesAvailable(cached.length);
+              }
+            }
+          }
+        } catch (e) {}
       }
       if (ordersRes.ok) {
         const ordersData = await ordersRes.json();
@@ -211,6 +234,10 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       if (supabaseRes && supabaseRes.ok) {
         const sbData = await supabaseRes.json();
         setSupabaseStatus(sbData);
+      }
+      if (firebaseRes && firebaseRes.ok) {
+        const fbData = await firebaseRes.json();
+        setFirebaseStatus(fbData);
       }
     } catch (err) {
       console.error('Error fetching admin data:', err);
@@ -354,6 +381,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     setFormTitle('');
     setFormPrice('');
     setFormDescription('');
+    setFormDriveUrl('');
     setFormPublished(true);
     setSelectedPdf(null);
     setSelectedCover(null);
@@ -384,6 +412,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     setFormTitle(note.title);
     setFormPrice(note.price.toString());
     setFormDescription(note.description || '');
+    setFormDriveUrl(note.drive_url || '');
     setFormPublished(note.published);
     setSelectedPdf(null);
     
@@ -420,8 +449,8 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       return;
     }
 
-    if (!editingNote && !selectedPdf && !uploadedPdfResult) {
-      setFormMessage({ type: 'error', text: 'Please upload a PDF file for this note.' });
+    if (!editingNote && !selectedPdf && !uploadedPdfResult && !formDriveUrl.trim()) {
+      setFormMessage({ type: 'error', text: 'Please either select a PDF file or provide a Google Drive / Cloud link for this note.' });
       return;
     }
 
@@ -445,6 +474,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       formData.append('title', formTitle.trim());
       formData.append('price', formPrice.trim());
       formData.append('description', formDescription.trim());
+      formData.append('drive_url', formDriveUrl.trim());
       formData.append('published', String(formPublished));
 
       if (finalResult) {
@@ -452,6 +482,9 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
         formData.append('uploaded_pdf_original_name', finalResult.pdf_original_name);
         formData.append('uploaded_pdf_size', String(finalResult.pdf_size));
       } else if (selectedPdf) {
+        if (selectedPdf.size > 25 * 1024 * 1024) {
+          throw new Error('PDF file upload is still processing. Please wait for the progress bar to complete (100%), or paste your Google Drive link for instant publishing.');
+        }
         formData.append('pdf', selectedPdf);
       }
       
@@ -584,6 +617,82 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       });
       setTimeout(() => setManageNotification(null), 4000);
     }
+  };
+
+  // Export Notes Backup as JSON file
+  const handleExportBackup = () => {
+    const backupData = {
+      version: 1,
+      exported_at: new Date().toISOString(),
+      store_name: profile.name,
+      notes: adminNotes,
+    };
+    const blob = new Blob([JSON.stringify(backupData, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `medicosminds-notes-backup-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    setManageNotification({ type: 'success', text: `Exported backup with ${adminNotes.length} notes!` });
+    setTimeout(() => setManageNotification(null), 4000);
+  };
+
+  // Restore Notes from Local Browser Safety Cache
+  const handleRestoreFromCache = async () => {
+    try {
+      const cachedStr = localStorage.getItem('medicosminds_admin_notes_backup');
+      if (!cachedStr) return;
+      const cachedNotes = JSON.parse(cachedStr);
+      const res = await fetch('/api/admin/restore-notes', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${adminToken}`,
+        },
+        body: JSON.stringify({ notes: cachedNotes }),
+      });
+      if (res.ok) {
+        setCachedNotesAvailable(0);
+        fetchAdminData();
+        onNotesUpdated();
+        setManageNotification({ type: 'success', text: `Successfully restored ${cachedNotes.length} notes from your browser backup!` });
+        setTimeout(() => setManageNotification(null), 5000);
+      }
+    } catch (e: any) {
+      setManageNotification({ type: 'error', text: 'Failed to restore backup.' });
+    }
+  };
+
+  // Import Notes Backup from uploaded JSON file
+  const handleImportBackupFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = async () => {
+      try {
+        const parsed = JSON.parse(reader.result as string);
+        const notesToRestore = Array.isArray(parsed) ? parsed : parsed.notes;
+        if (!Array.isArray(notesToRestore)) throw new Error('Invalid format');
+        const res = await fetch('/api/admin/restore-notes', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${adminToken}`,
+          },
+          body: JSON.stringify({ notes: notesToRestore }),
+        });
+        if (res.ok) {
+          fetchAdminData();
+          onNotesUpdated();
+          setManageNotification({ type: 'success', text: `Successfully imported ${notesToRestore.length} notes from backup file!` });
+          setTimeout(() => setManageNotification(null), 5000);
+        }
+      } catch (err) {
+        setManageNotification({ type: 'error', text: 'Invalid backup file format.' });
+      }
+    };
+    reader.readAsText(file);
   };
 
   // Handle Approve Order
@@ -964,7 +1073,31 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
             </div>
 
             {/* Tab Body */}
-            <div className="p-4 sm:p-6 overflow-y-auto flex-1 bg-white">
+            <div className="p-4 sm:p-6 overflow-y-auto flex-1 bg-white space-y-4">
+              {/* Universal Browser Safety Cache Recovery Banner */}
+              {cachedNotesAvailable > 0 && (
+                <div className="p-3.5 bg-amber-50 rounded-2xl border-2 border-amber-400 flex items-center justify-between gap-3 text-amber-950 animate-in fade-in duration-200 shadow-sm">
+                  <div className="flex items-center gap-2.5">
+                    <AlertCircle className="w-5 h-5 text-amber-600 shrink-0" />
+                    <div>
+                      <p className="text-xs font-bold">
+                        Local Browser Backup Found ({cachedNotesAvailable} Notes)
+                      </p>
+                      <p className="text-[11px] text-amber-800">
+                        We found your previously added notes safely cached in this browser. Click below to restore all {cachedNotesAvailable} notes to your store!
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleRestoreFromCache}
+                    className="shrink-0 px-3.5 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-black shadow-md cursor-pointer transition-colors"
+                  >
+                    Restore {cachedNotesAvailable} Notes Now
+                  </button>
+                </div>
+              )}
+
               {/* TAB 1: ADD / EDIT NOTE */}
               {activeTab === 'upload' && (
                 <div className="max-w-xl mx-auto">
@@ -1250,7 +1383,27 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                       </div>
                     </div>
 
-                    {/* Images Section: 1 Cover Thumbnail + 2 Inside Page Previews (100% uncropped) */}
+                    {/* Optional: Cloud Link (Google Drive / Mega / Dropbox) for Multi-Gigabyte Files */}
+                    <div className="bg-stone-50 border border-stone-200 rounded-2xl p-3.5 space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <label htmlFor="note-form-drive-url" className="text-xs font-bold text-stone-700 uppercase tracking-wider flex items-center gap-1.5">
+                          <ExternalLink className="w-3.5 h-3.5 text-[#5C715E]" />
+                          <span>Or Cloud Download Link (Google Drive / Mega / Dropbox)</span>
+                        </label>
+                        <span className="text-[10px] font-bold text-stone-500 uppercase">Optional for 1GB-3GB Bundles</span>
+                      </div>
+                      <p className="text-[11px] text-stone-500">
+                        If your notes or bundles are huge (up to 3 GB) and you prefer not to wait for browser uploading, simply paste your shareable Google Drive or Cloud link here. Verified buyers will receive instant access to this link!
+                      </p>
+                      <input
+                        id="note-form-drive-url"
+                        type="url"
+                        placeholder="https://drive.google.com/file/d/... or https://mega.nz/..."
+                        value={formDriveUrl}
+                        onChange={(e) => setFormDriveUrl(e.target.value)}
+                        className="w-full px-3.5 py-2 rounded-xl border border-stone-300 text-xs focus:outline-none focus:ring-2 focus:ring-[#5C715E] bg-white font-mono"
+                      />
+                    </div>
                     <div className="space-y-3 pt-1">
                       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1">
                         <div>
@@ -1507,24 +1660,74 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
               {/* TAB 2: MANAGE EXISTING NOTES */}
               {activeTab === 'manage' && (
                 <div className="space-y-4">
-                  <div className="flex items-center justify-between">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                     <div>
                       <h4 className="text-base font-bold text-[#2D3436]">Your Uploaded Notes</h4>
                       <p className="text-xs text-stone-500">
-                        Edit prices, replace PDFs, hide from public store, or delete
+                        Edit prices, replace PDFs, hide from public store, or delete ({adminNotes.length} notes)
                       </p>
                     </div>
-                    <button
-                      onClick={() => {
-                        resetForm();
-                        setActiveTab('upload');
-                      }}
-                      className="inline-flex items-center gap-1 px-3 py-1.5 bg-[#5C715E] text-white rounded-lg text-xs font-bold shadow-2xs hover:bg-[#4A5D4E] cursor-pointer"
-                    >
-                      <PlusCircle className="w-3.5 h-3.5" />
-                      <span>Add New Note</span>
-                    </button>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <button
+                        type="button"
+                        onClick={handleExportBackup}
+                        className="inline-flex items-center gap-1 px-3 py-1.5 bg-stone-100 hover:bg-stone-200 text-stone-700 rounded-lg text-xs font-bold shadow-2xs cursor-pointer transition-colors"
+                        title="Download a complete JSON backup of all your notes to your computer or phone"
+                      >
+                        <Download className="w-3.5 h-3.5" />
+                        <span>Export Backup</span>
+                      </button>
+
+                      <label
+                        className="inline-flex items-center gap-1 px-3 py-1.5 bg-stone-100 hover:bg-stone-200 text-stone-700 rounded-lg text-xs font-bold shadow-2xs cursor-pointer transition-colors"
+                        title="Restore notes from an exported JSON backup"
+                      >
+                        <Upload className="w-3.5 h-3.5" />
+                        <span>Import Backup</span>
+                        <input
+                          type="file"
+                          accept=".json,application/json"
+                          onChange={handleImportBackupFile}
+                          className="hidden"
+                        />
+                      </label>
+
+                      <button
+                        onClick={() => {
+                          resetForm();
+                          setActiveTab('upload');
+                        }}
+                        className="inline-flex items-center gap-1 px-3 py-1.5 bg-[#5C715E] text-white rounded-lg text-xs font-bold shadow-2xs hover:bg-[#4A5D4E] cursor-pointer"
+                      >
+                        <PlusCircle className="w-3.5 h-3.5" />
+                        <span>Add New Note</span>
+                      </button>
+                    </div>
                   </div>
+
+                  {/* Browser Safety Cache Recovery Banner */}
+                  {cachedNotesAvailable > 0 && (
+                    <div className="p-3.5 bg-amber-50 rounded-2xl border border-amber-300 flex items-center justify-between gap-3 text-amber-950 animate-in fade-in duration-200">
+                      <div className="flex items-center gap-2.5">
+                        <AlertCircle className="w-5 h-5 text-amber-600 shrink-0" />
+                        <div>
+                          <p className="text-xs font-bold">
+                            Local Browser Backup Found ({cachedNotesAvailable} Notes)
+                          </p>
+                          <p className="text-[11px] text-amber-800">
+                            We detected notes stored in your browser session from earlier. Click restore to re-sync them to your store!
+                          </p>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={handleRestoreFromCache}
+                        className="shrink-0 px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-bold shadow-xs cursor-pointer transition-colors"
+                      >
+                        Restore {cachedNotesAvailable} Notes
+                      </button>
+                    </div>
+                  )}
 
                   {manageNotification && (
                     <div
@@ -2294,17 +2497,33 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                         <Database className="w-3.5 h-3.5 text-[#5C715E]" />
                         Database & Storage Engine
                       </h5>
-                      <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${
-                        supabaseStatus?.allTablesReady
-                          ? 'bg-emerald-100 text-emerald-900 border-emerald-200'
-                          : 'bg-emerald-50 text-emerald-800 border-emerald-200'
-                      }`}>
-                        {supabaseStatus?.allTablesReady ? 'Cloud DB Synced' : 'Local Storage Engine Active'}
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-bold border bg-emerald-100 text-emerald-900 border-emerald-200">
+                        Firebase Cloud Persistent
                       </span>
                     </div>
 
+                    {/* Firebase Firestore Cloud Persistence Badge */}
+                    <div className="p-3 bg-emerald-50 rounded-xl border border-emerald-300 flex items-start gap-3">
+                      <div className="w-7 h-7 rounded-lg bg-emerald-600 text-white flex items-center justify-center font-bold text-xs shrink-0">
+                        🔥
+                      </div>
+                      <div className="flex-1">
+                        <div className="flex items-center justify-between">
+                          <p className="text-xs font-bold text-emerald-950">
+                            Firebase Firestore Cloud Storage
+                          </p>
+                          <span className="text-[10px] bg-emerald-200 text-emerald-900 font-bold px-2 py-0.5 rounded-full">
+                            {firebaseStatus?.connected ? 'Live & Synced' : 'Cloud Sync Ready'}
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-emerald-800 mt-0.5 leading-snug">
+                          Notes and student orders are stored in Google Cloud Firestore. Your notes are permanently preserved and will never be removed on redeployments or server resets.
+                        </p>
+                      </div>
+                    </div>
+
                     <p className="text-xs text-stone-600 leading-relaxed">
-                      Orders, sales records, and uploaded PDFs are safely persisted on disk.
+                      Orders, sales records, and uploaded PDFs are safely persisted on disk and cloud.
                       {supabaseStatus?.configured ? (
                         supabaseStatus?.allTablesReady ? (
                           <span className="text-emerald-700 font-medium ml-1">

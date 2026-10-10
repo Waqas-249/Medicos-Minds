@@ -34,6 +34,7 @@ export class ChunkUploader {
   private abortController: AbortController | null = null;
   private isAborted = false;
   private uploadId: string | null = null;
+  private activePromise: Promise<ChunkUploadResult> | null = null;
 
   constructor(file: File, adminToken: string, onProgress: (progress: ChunkUploadProgress) => void) {
     this.file = file;
@@ -43,15 +44,25 @@ export class ChunkUploader {
 
   public static determineChunkSize(fileSize: number): number {
     if (fileSize <= 50 * 1024 * 1024) {
-      return 5 * 1024 * 1024; // 5 MB chunks for files <= 50 MB
-    } else if (fileSize <= 300 * 1024 * 1024) {
-      return 10 * 1024 * 1024; // 10 MB chunks for files <= 300 MB
+      return 2 * 1024 * 1024; // 2 MB chunks for files <= 50 MB
+    } else if (fileSize <= 500 * 1024 * 1024) {
+      return 4 * 1024 * 1024; // 4 MB chunks for files <= 500 MB
     } else {
-      return 20 * 1024 * 1024; // 20 MB chunks for large files up to 3 GB
+      return 5 * 1024 * 1024; // 5 MB chunks for large files up to 3 GB (smooth, prevents proxy drops)
     }
   }
 
-  public async start(): Promise<ChunkUploadResult> {
+  public start(): Promise<ChunkUploadResult> {
+    if (this.activePromise) {
+      return this.activePromise;
+    }
+    this.activePromise = this.executeUpload().finally(() => {
+      this.activePromise = null;
+    });
+    return this.activePromise;
+  }
+
+  private async executeUpload(): Promise<ChunkUploadResult> {
     this.isAborted = false;
     this.abortController = new AbortController();
 
@@ -149,7 +160,7 @@ export class ChunkUploader {
     const queue = Array.from({ length: totalChunks }, (_, i) => i);
     const CONCURRENCY = 2;
 
-    const uploadChunkWithRetry = async (chunkIndex: number, maxRetries = 3): Promise<void> => {
+    const uploadChunkWithRetry = async (chunkIndex: number, maxRetries = 6): Promise<void> => {
       const start = chunkIndex * chunkSize;
       const end = Math.min(fileSize, (chunkIndex + 1) * chunkSize);
       const chunkBlob = this.file.slice(start, end);
@@ -187,10 +198,10 @@ export class ChunkUploader {
           if (this.isAborted) throw err;
           attempt++;
           if (attempt > maxRetries) {
-            throw new Error(`Failed to upload chunk ${chunkIndex + 1} of ${totalChunks} after ${maxRetries} retries: ${err.message}`);
+            throw new Error(`Connection interrupted on chunk ${chunkIndex + 1} of ${totalChunks} after ${maxRetries} automatic retries. Please check your internet connection.`);
           }
-          // Exponential backoff retry
-          await new Promise((r) => setTimeout(r, 600 * attempt));
+          // Exponential backoff with jitter
+          await new Promise((r) => setTimeout(r, 1000 * Math.min(attempt, 5)));
         }
       }
     };

@@ -68,9 +68,32 @@ const isValidEmail = (email: string): boolean => {
 };
 
 export const CheckoutModal: React.FC<CheckoutModalProps> = ({ note, onClose, initialOrderId }) => {
+  // Check if we have an active checkout session in localStorage for this note or initialOrderId
+  const activeSavedSession = React.useMemo(() => {
+    try {
+      const saved = localStorage.getItem('medicos_active_checkout');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        const time = parsed.createdAt || parsed.timestamp || 0;
+        if (Date.now() - time < 24 * 60 * 60 * 1000) {
+          if (initialOrderId && parsed.orderId === initialOrderId) return parsed;
+          if (note && parsed.note?.id === note.id) return parsed;
+        }
+      }
+    } catch (e) {}
+    return null;
+  }, [note, initialOrderId]);
+
   // Step & Customer Details State
-  const [step, setStep] = useState<CheckoutStep>('customer_info');
+  const [step, setStep] = useState<CheckoutStep>(() => {
+    if (initialOrderId) return 'payment_process';
+    if (activeSavedSession?.step === 'verification_pending') return 'verification_pending';
+    if (activeSavedSession?.orderId) return 'payment_process';
+    return 'customer_info';
+  });
+
   const [customerName, setCustomerName] = useState(() => {
+    if (activeSavedSession?.customerName) return activeSavedSession.customerName;
     try {
       const saved = localStorage.getItem('physionotes_customer_info');
       if (saved) return JSON.parse(saved).name || '';
@@ -78,6 +101,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ note, onClose, ini
     return '';
   });
   const [customerEmail, setCustomerEmail] = useState(() => {
+    if (activeSavedSession?.customerEmail) return activeSavedSession.customerEmail;
     try {
       const saved = localStorage.getItem('physionotes_customer_info');
       if (saved) return JSON.parse(saved).email || '';
@@ -85,6 +109,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ note, onClose, ini
     return '';
   });
   const [customerPhone, setCustomerPhone] = useState(() => {
+    if (activeSavedSession?.customerPhone) return activeSavedSession.customerPhone;
     try {
       const saved = localStorage.getItem('physionotes_customer_info');
       if (saved) return JSON.parse(saved).phone || '';
@@ -99,8 +124,8 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ note, onClose, ini
   const [verifyingOtp, setVerifyingOtp] = useState(false);
   const [otpNotice, setOtpNotice] = useState<string | null>(null);
 
-  // 5-Minute QR Session Timer & Verification State
-  const [cooldownSeconds, setCooldownSeconds] = useState(300); // 300s = 5 minutes
+  // 15-Minute QR Session Timer & Verification State
+  const [cooldownSeconds, setCooldownSeconds] = useState(900); // 900s = 15 minutes (generous time for UPI payment)
   const [isExpired, setIsExpired] = useState(false);
   const [returnedFromUpi, setReturnedFromUpi] = useState(false);
   const hasLeftToUpiAppRef = React.useRef(false);
@@ -109,7 +134,9 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ note, onClose, ini
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [rejectionReason, setRejectionReason] = useState<string | null>(null);
-  const [createdOrderId, setCreatedOrderId] = useState<string | null>(initialOrderId || null);
+  const [createdOrderId, setCreatedOrderId] = useState<string | null>(() => {
+    return initialOrderId || activeSavedSession?.orderId || null;
+  });
   const [downloadToken, setDownloadToken] = useState<string | null>(null);
   const [paidOrder, setPaidOrder] = useState<Order | null>(null);
   
@@ -199,8 +226,56 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ note, onClose, ini
       setCreatedOrderId(initialOrderId);
       setStep('payment_process');
       checkOrderStatus(false, initialOrderId);
+    } else if (activeSavedSession?.orderId) {
+      checkOrderStatus(true, activeSavedSession.orderId);
     }
-  }, [initialOrderId]);
+  }, [initialOrderId, activeSavedSession]);
+
+  // Persist active checkout in localStorage whenever in payment_process or verification_pending
+  useEffect(() => {
+    if (createdOrderId && note && (step === 'payment_process' || step === 'verification_pending')) {
+      try {
+        localStorage.setItem(
+          'medicos_active_checkout',
+          JSON.stringify({
+            orderId: createdOrderId,
+            note,
+            customerName,
+            customerEmail,
+            customerPhone,
+            step,
+            createdAt: Date.now(),
+          })
+        );
+      } catch (e) {}
+    } else if (step === 'payment_success' || step === 'payment_rejected') {
+      try {
+        localStorage.removeItem('medicos_active_checkout');
+      } catch (e) {}
+    }
+  }, [createdOrderId, step, note, customerName, customerEmail, customerPhone]);
+
+  // Handle Mobile Hardware Back Button: Prevent exiting payment flow accidentally
+  useEffect(() => {
+    if (step === 'payment_process' || step === 'verification_pending') {
+      try {
+        window.history.pushState({ medicosModal: 'checkout', orderId: createdOrderId }, '', window.location.href);
+      } catch (e) {}
+
+      const handlePopState = () => {
+        // Tapping back on phone stays in the modal with high-visibility guidance!
+        try {
+          window.history.pushState({ medicosModal: 'checkout', orderId: createdOrderId }, '', window.location.href);
+        } catch (e) {}
+        setStatusMessage("⚠️ Payment in progress: If you already paid, tap '✅ I Have Paid — Get My PDF' below!");
+      };
+
+      window.addEventListener('popstate', handlePopState);
+      return () => {
+        window.removeEventListener('popstate', handlePopState);
+      };
+    }
+  }, [step, createdOrderId]);
 
   // Status polling hook: when awaiting verification, check order status automatically every 3 seconds
   useEffect(() => {
@@ -292,14 +367,12 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ note, onClose, ini
     return `https://wa.me/${digits}?text=${msg}`;
   };
 
-  // 5-Minute Session Timer: Starts counting down when in payment process
+  // 15-Minute Session Timer: Starts counting down when in payment process
   useEffect(() => {
     if (step !== 'payment_process') return;
 
-    setCooldownSeconds(300); // 5 minutes
+    setCooldownSeconds(900); // 15 minutes
     setIsExpired(false);
-    hasLeftToUpiAppRef.current = false;
-    setReturnedFromUpi(false);
 
     const timer = setInterval(() => {
       setCooldownSeconds((prev) => {
@@ -322,14 +395,16 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ note, onClose, ini
     return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
   };
 
-  // When returning from external UPI app, show helpful guidance to submit UTR
+  // When returning from external UPI app, show helpful guidance to submit verification
   useEffect(() => {
     if (step !== 'payment_process' || !createdOrderId || isExpired) return;
 
     const handleReturnToTab = () => {
-      if (document.visibilityState === 'visible' && hasLeftToUpiAppRef.current) {
-        setReturnedFromUpi(true);
-        // Automatically check if payment was captured or webhook arrived
+      if (document.visibilityState === 'visible') {
+        if (hasLeftToUpiAppRef.current) {
+          setReturnedFromUpi(true);
+        }
+        // Automatically check if payment was captured or approved
         checkOrderStatus(true);
       }
     };
@@ -829,10 +904,30 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ note, onClose, ini
             </form>
           )}
 
-          {/* STEP 2: DIRECT UPI PAYMENT, 5-MIN COOLDOWN & REDIRECT VERIFICATION */}
+          {/* STEP 2: DIRECT UPI PAYMENT, 15-MIN COOLDOWN & REDIRECT VERIFICATION */}
           {step === 'payment_process' && (
             <div className="space-y-4">
-              {/* 5-Minute Cooldown Timer Bar */}
+              {/* Returned from UPI App Banner */}
+              {returnedFromUpi && (
+                <div className="p-3.5 bg-emerald-100 border-2 border-emerald-500 rounded-2xl text-emerald-950 flex items-center justify-between gap-3 animate-in fade-in duration-200 shadow-sm">
+                  <div className="flex items-center gap-2.5">
+                    <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
+                    <div>
+                      <p className="text-xs font-black text-emerald-950">Back from Payment App?</p>
+                      <p className="text-[11px] text-emerald-800">Paid ₹{note.price}? Tap below to get your PDF notes!</p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleSubmitUpiPayment}
+                    className="shrink-0 px-3.5 py-2 bg-emerald-700 hover:bg-emerald-800 text-white rounded-xl text-xs font-black shadow-md cursor-pointer animate-pulse"
+                  >
+                    Get My PDF →
+                  </button>
+                </div>
+              )}
+
+              {/* 15-Minute Cooldown Timer Bar */}
               <div className={`p-3.5 rounded-2xl border transition-all ${
                 isExpired 
                   ? 'bg-red-50 border-red-200 text-red-900' 
@@ -855,12 +950,12 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ note, onClose, ini
                     <div>
                       <div className="text-xs font-bold flex items-center gap-1.5">
                         <Timer className="w-3.5 h-3.5" />
-                        <span>{isExpired ? 'Payment Session Expired' : '5-Minute Active Session'}</span>
+                        <span>{isExpired ? 'Payment Session Expired' : 'Active Payment Session'}</span>
                       </div>
                       <div className="text-[11px] opacity-80">
                         {isExpired 
                           ? 'Please refresh to generate a new QR' 
-                          : 'Auto-verifies upon return from UPI app'}
+                          : 'Valid for 15 minutes • Auto-verifies upon return'}
                       </div>
                     </div>
                   </div>
@@ -882,7 +977,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ note, onClose, ini
                       className={`h-full transition-all duration-1000 ${
                         cooldownSeconds < 60 ? 'bg-red-500' : 'bg-[#5C715E]'
                       }`}
-                      style={{ width: `${Math.max(0, (cooldownSeconds / 300) * 100)}%` }}
+                      style={{ width: `${Math.max(0, (cooldownSeconds / 900) * 100)}%` }}
                     />
                   </div>
                 )}
@@ -910,11 +1005,78 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ note, onClose, ini
                 </div>
               ) : (
                 <div className="space-y-3.5">
-                  {/* Single Payment Method: UPI QR Code */}
+                  {/* Mobile UPI App Direct Buttons */}
+                  <div className="bg-emerald-50/80 p-3.5 rounded-2xl border border-emerald-200 text-left space-y-2.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] font-bold text-emerald-950 uppercase tracking-wider flex items-center gap-1.5">
+                        <Smartphone className="w-3.5 h-3.5 text-emerald-600" />
+                        <span>Pay directly via UPI App:</span>
+                      </span>
+                      <span className="text-xs font-black text-emerald-800 bg-white px-2 py-0.5 rounded-md border border-emerald-200">
+                        ₹{note.price}
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2">
+                      <a
+                        href={directUpiLink}
+                        onClick={() => { hasLeftToUpiAppRef.current = true; }}
+                        className="flex items-center justify-center gap-1.5 py-2.5 px-3 bg-white hover:bg-stone-50 border border-emerald-200 rounded-xl text-xs font-bold text-stone-800 shadow-2xs hover:border-emerald-400 transition-all active:scale-98 text-center"
+                      >
+                        <span className="w-2 h-2 rounded-full bg-blue-500"></span>
+                        <span>Google Pay</span>
+                      </a>
+                      <a
+                        href={directUpiLink}
+                        onClick={() => { hasLeftToUpiAppRef.current = true; }}
+                        className="flex items-center justify-center gap-1.5 py-2.5 px-3 bg-white hover:bg-stone-50 border border-emerald-200 rounded-xl text-xs font-bold text-stone-800 shadow-2xs hover:border-purple-400 transition-all active:scale-98 text-center"
+                      >
+                        <span className="w-2 h-2 rounded-full bg-purple-600"></span>
+                        <span>PhonePe</span>
+                      </a>
+                      <a
+                        href={directUpiLink}
+                        onClick={() => { hasLeftToUpiAppRef.current = true; }}
+                        className="flex items-center justify-center gap-1.5 py-2.5 px-3 bg-white hover:bg-stone-50 border border-emerald-200 rounded-xl text-xs font-bold text-stone-800 shadow-2xs hover:border-sky-400 transition-all active:scale-98 text-center"
+                      >
+                        <span className="w-2 h-2 rounded-full bg-sky-500"></span>
+                        <span>Paytm</span>
+                      </a>
+                      <a
+                        href={directUpiLink}
+                        onClick={() => { hasLeftToUpiAppRef.current = true; }}
+                        className="flex items-center justify-center gap-1.5 py-2.5 px-3 bg-[#5C715E] hover:bg-[#4A5D4E] text-white rounded-xl text-xs font-bold shadow-2xs transition-all active:scale-98 text-center"
+                      >
+                        <ExternalLink className="w-3 h-3" />
+                        <span>Any UPI App</span>
+                      </a>
+                    </div>
+
+                    {/* Quick Direct "I Have Paid" Action Button immediately below UPI apps */}
+                    <div className="pt-0.5">
+                      <button
+                        type="button"
+                        onClick={handleSubmitUpiPayment}
+                        className="w-full py-3 px-3.5 bg-emerald-600 hover:bg-emerald-700 active:scale-98 text-white rounded-xl text-xs font-black flex items-center justify-center gap-2 shadow-sm transition-all cursor-pointer"
+                      >
+                        <CheckCircle2 className="w-4 h-4 text-emerald-100" />
+                        <span>Done in UPI App? Tap: I Have Paid — Get My PDF</span>
+                      </button>
+                    </div>
+
+                    {/* Instagram in-app browser alert */}
+                    {typeof navigator !== 'undefined' && /Instagram|FBAN|FBAV/i.test(navigator.userAgent) && (
+                      <div className="p-2.5 bg-amber-50 rounded-xl border border-amber-200 text-[11px] text-amber-900 leading-tight">
+                        <strong>Instagram Browser Tip:</strong> If your UPI app doesn't open automatically, tap <strong>⋮</strong> at top-right of your screen and select <strong>"Open in Chrome / Browser"</strong>.
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Or Scan QR Code to Pay */}
                   <div className="bg-[#F9F7F2] p-4 rounded-2xl border border-[#5C715E]/20 text-center flex flex-col items-center space-y-3 animate-in fade-in duration-150">
                     <div className="flex items-center justify-between w-full">
                       <span className="text-[11px] font-bold text-stone-500 uppercase tracking-wider">
-                        Scan QR Code to Pay
+                        Or Scan QR Code to Pay
                       </span>
                       <span className="text-xs font-black text-[#5C715E] bg-[#5C715E]/10 px-2.5 py-0.5 rounded-full border border-[#5C715E]/20">
                         ₹{note.price}
@@ -955,25 +1117,6 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ note, onClose, ini
                       <span>•</span>
                       <span>UPI: <strong className="font-mono">{targetUpi}</strong></span>
                     </div>
-
-                    {/* Simple Instructions */}
-                    <div className="w-full bg-white/80 p-3 rounded-xl border border-stone-200/80 text-left space-y-1.5 text-xs text-stone-700">
-                      <div className="font-bold text-stone-900 text-[11px] uppercase tracking-wider">
-                        How to Pay:
-                      </div>
-                      <div className="flex items-start gap-2">
-                        <span className="w-4 h-4 rounded-full bg-[#5C715E] text-white flex items-center justify-center text-[10px] font-bold shrink-0 mt-0.5">1</span>
-                        <span>Open <strong>Google Pay, PhonePe, Paytm</strong>, or any UPI app and scan the QR code above.</span>
-                      </div>
-                      <div className="flex items-start gap-2">
-                        <span className="w-4 h-4 rounded-full bg-[#5C715E] text-white flex items-center justify-center text-[10px] font-bold shrink-0 mt-0.5">2</span>
-                        <span>Pay <strong>₹{note.price}</strong> to complete your transfer.</span>
-                      </div>
-                      <div className="flex items-start gap-2">
-                        <span className="w-4 h-4 rounded-full bg-[#5C715E] text-white flex items-center justify-center text-[10px] font-bold shrink-0 mt-0.5">3</span>
-                        <span>Click <strong>"I Have Paid via QR Code"</strong> below to confirm your payment.</span>
-                      </div>
-                    </div>
                   </div>
 
                   {/* Payment Completed Confirmation Section */}
@@ -1002,73 +1145,22 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ note, onClose, ini
                           if (error) setError(null);
                         }}
                         placeholder="student@example.com"
-                        className="w-full px-3.5 py-2 rounded-xl border border-stone-300 text-xs focus:outline-none focus:ring-2 focus:ring-[#5C715E] bg-white"
+                        className="w-full px-3.5 py-2.5 rounded-xl border border-stone-300 text-xs focus:outline-none focus:ring-2 focus:ring-[#5C715E] bg-white"
                       />
                       <p className="text-[10px] text-stone-400 mt-0.5">
                         Your permanent PDF access and download link will be linked to this email.
                       </p>
                     </div>
-
-                    {/* Optional Payment Screenshot Upload */}
-                    <div>
-                      <label className="block text-[11px] font-bold text-stone-700 mb-1">
-                        Payment Screenshot <span className="text-stone-400 font-normal">(Optional proof)</span>
-                      </label>
-                      <input
-                        ref={screenshotInputRef}
-                        type="file"
-                        accept="image/*"
-                        onChange={handleScreenshotChange}
-                        className="hidden"
-                        id="payment-screenshot-file"
-                      />
-                      {!screenshotPreview ? (
-                        <button
-                          type="button"
-                          onClick={() => screenshotInputRef.current?.click()}
-                          className="w-full py-2.5 px-3 border border-dashed border-stone-300 hover:border-[#5C715E] hover:bg-emerald-50/40 rounded-xl flex items-center justify-center gap-2 text-stone-600 hover:text-[#5C715E] text-xs font-semibold transition-all cursor-pointer"
-                        >
-                          <Camera className="w-4 h-4 text-stone-500" />
-                          <span>Attach Payment Screenshot (Optional)</span>
-                        </button>
-                      ) : (
-                        <div className="flex items-center justify-between p-2.5 bg-emerald-50/80 border border-emerald-200 rounded-xl">
-                          <div className="flex items-center gap-2.5 overflow-hidden">
-                            <img
-                              src={screenshotPreview}
-                              alt="Payment Screenshot Preview"
-                              className="w-10 h-10 object-cover rounded-lg border border-emerald-300 shrink-0"
-                            />
-                            <div className="text-left overflow-hidden">
-                              <p className="text-xs font-bold text-emerald-900 truncate">
-                                {screenshotFile?.name || 'Payment_Screenshot.png'}
-                              </p>
-                              <p className="text-[10px] text-emerald-700">
-                                Screenshot attached
-                              </p>
-                            </div>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={handleRemoveScreenshot}
-                            className="text-stone-400 hover:text-red-600 p-1 transition-colors cursor-pointer"
-                            title="Remove screenshot"
-                          >
-                            <XCircle className="w-4 h-4" />
-                          </button>
-                        </div>
-                      )}
-                    </div>
                   </div>
 
                   {/* Submit Confirmation Action Button */}
-                  <div className="pt-1">
+                  <div className="pt-2">
                     <button
                       id="confirm-upi-payment-btn"
                       type="button"
                       disabled={loading}
                       onClick={handleSubmitUpiPayment}
-                      className="w-full inline-flex items-center justify-center gap-2 py-3.5 px-4 bg-[#5C715E] hover:bg-[#4A5D4E] text-white rounded-xl font-bold text-sm shadow-md shadow-[#5C715E]/20 transition-all active:scale-98 disabled:opacity-50 cursor-pointer"
+                      className="w-full inline-flex items-center justify-center gap-2.5 py-4 px-4 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-black text-sm sm:text-base shadow-lg shadow-emerald-700/25 transition-all active:scale-98 disabled:opacity-50 cursor-pointer"
                     >
                       {loading ? (
                         <div className="flex items-center gap-2">
@@ -1077,13 +1169,13 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ note, onClose, ini
                         </div>
                       ) : (
                         <>
-                          <CheckCircle2 className="w-4 h-4" />
-                          <span>I Have Paid via QR Code</span>
+                          <CheckCircle2 className="w-5 h-5 text-emerald-100" />
+                          <span>✅ I HAVE PAID — GET MY PDF</span>
                         </>
                       )}
                     </button>
-                    <p className="text-[11px] text-center text-stone-500 mt-2">
-                      Click after completing the QR payment to confirm and receive your PDF.
+                    <p className="text-[11px] text-center text-stone-600 mt-2 font-medium">
+                      Tap after paying ₹{note.price} to submit proof and receive your instant PDF download link.
                     </p>
                   </div>
                 </div>

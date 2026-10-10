@@ -1,0 +1,81 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Default Deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
+
+    function isValidNote(data) {
+      return data.keys().hasAll(['id', 'title', 'price', 'published']) &&
+        data.id is string && data.id.size() <= 128 &&
+        data.title is string && data.title.size() > 0 && data.title.size() <= 200 &&
+        data.price is number && data.price >= 0 &&
+        data.published is bool &&
+        (!('description' in data) || (data.description is string && data.description.size() <= 5000)) &&
+        (!('drive_url' in data) || (data.drive_url is string && data.drive_url.size() <= 2048)) &&
+        (!('cover_image' in data) || (data.cover_image is string && data.cover_image.size() <= 2048));
+    }
+
+    function isValidOrder(data) {
+      return data.keys().hasAll(['id', 'note_id', 'amount', 'customer_name', 'status']) &&
+        data.id is string && data.id.size() <= 128 &&
+        data.note_id is string && data.note_id.size() <= 128 &&
+        data.amount is number && data.amount >= 0 &&
+        data.customer_name is string && data.customer_name.size() > 0 && data.customer_name.size() <= 150 &&
+        data.status in ['initiated', 'pending_verification', 'approved', 'rejected'] &&
+        (!('customer_email' in data) || (data.customer_email is string && data.customer_email.size() <= 200)) &&
+        (!('customer_phone' in data) || (data.customer_phone is string && data.customer_phone.size() <= 30)) &&
+        (!('utr_number' in data) || (data.utr_number is string && data.utr_number.size() <= 64));
+    }
+
+    // Educational Notes Collection
+    match /notes/{noteId} {
+      allow get: if isValidId(noteId) && (existing().published == true || isAdmin());
+      allow list: if resource.data.published == true || isAdmin();
+      allow create, update, delete: if isValidId(noteId) && isAdmin() && (request.method == 'delete' || isValidNote(incoming()));
+    }
+
+    // Student Purchase Orders
+    match /orders/{orderId} {
+      allow get: if isValidId(orderId) && (isAdmin() || (isSignedIn() && existing().customer_id == request.auth.uid));
+      allow list: if isAdmin();
+      allow create: if isValidId(orderId) && isValidOrder(incoming()) && incoming().status in ['initiated', 'pending_verification'];
+      allow update: if isValidId(orderId) && isAdmin() && isValidOrder(incoming());
+      allow delete: if isValidId(orderId) && isAdmin();
+    }
+
+    // Public Store Settings
+    match /settings/{settingId} {
+      allow read: if isValidId(settingId);
+      allow write: if isValidId(settingId) && isAdmin();
+    }
+
+    // Admin authorization collection
+    match /admins/{adminId} {
+      allow read: if isSignedIn() && request.auth.uid == adminId;
+      allow write: if false; // Provisioned strictly via server-side admin
+    }
+  }
+}

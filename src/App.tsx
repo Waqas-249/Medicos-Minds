@@ -7,7 +7,7 @@ import { CheckoutModal } from './components/CheckoutModal';
 import { PurchasesModal } from './components/PurchasesModal';
 import { AdminPanel } from './components/AdminPanel';
 import { Footer } from './components/Footer';
-import { Instagram, GraduationCap, ShieldCheck, Zap, BookOpen } from 'lucide-react';
+import { Instagram, GraduationCap, ShieldCheck, Zap, BookOpen, X } from 'lucide-react';
 
 export default function App() {
   const [profile, setProfile] = useState<CreatorProfile>({
@@ -29,6 +29,30 @@ export default function App() {
   const [initialOrderId, setInitialOrderId] = useState<string | null>(null);
   const [isPurchasesOpen, setIsPurchasesOpen] = useState(false);
   const [isAdminOpen, setIsAdminOpen] = useState(false);
+
+  // Active Pending Checkout session (Persisted in localStorage so returning from payment app NEVER loses state)
+  const [pendingCheckoutSession, setPendingCheckoutSession] = useState<{
+    orderId: string;
+    note: Note;
+    customerName?: string;
+    customerEmail?: string;
+    customerPhone?: string;
+    createdAt?: number;
+    timestamp?: number;
+  } | null>(() => {
+    try {
+      const saved = localStorage.getItem('medicos_active_checkout');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        const time = parsed.createdAt || parsed.timestamp || 0;
+        // Valid for up to 24 hours
+        if (Date.now() - time < 24 * 60 * 60 * 1000 && parsed.note) {
+          return parsed;
+        }
+      }
+    } catch (e) {}
+    return null;
+  });
 
   // Admin authentication state
   const [adminToken, setAdminToken] = useState<string | null>(() => {
@@ -95,7 +119,38 @@ export default function App() {
     fetchProfile();
     fetchNotes();
 
-    // Check if customer returned from UPI app with order_id in URL
+    // Check if customer returned from UPI app with order_id in URL or localStorage
+    const syncActiveSession = () => {
+      try {
+        const saved = localStorage.getItem('medicos_active_checkout');
+        if (saved) {
+          const parsed = JSON.parse(saved);
+          const time = parsed.createdAt || parsed.timestamp || 0;
+          if (Date.now() - time < 24 * 60 * 60 * 1000 && parsed.note) {
+            setPendingCheckoutSession(parsed);
+            // If user returned within 20 minutes and modal is not open, automatically restore payment screen!
+            if (Date.now() - time < 20 * 60 * 1000 && !checkoutNote) {
+              setInitialOrderId(parsed.orderId);
+              setCheckoutNote(parsed.note);
+            }
+          } else {
+            localStorage.removeItem('medicos_active_checkout');
+            setPendingCheckoutSession(null);
+          }
+        }
+      } catch (e) {}
+    };
+
+    syncActiveSession();
+
+    // Listen for tab focus / return from external UPI app (GPay, PhonePe, Paytm)
+    const handleWindowFocus = () => {
+      syncActiveSession();
+    };
+
+    window.addEventListener('focus', handleWindowFocus);
+    document.addEventListener('visibilitychange', handleWindowFocus);
+
     try {
       const params = new URLSearchParams(window.location.search);
       const orderIdParam = params.get('order_id');
@@ -120,7 +175,26 @@ export default function App() {
     } catch (e) {
       console.warn('URL params parsing failed:', e);
     }
+
+    return () => {
+      window.removeEventListener('focus', handleWindowFocus);
+      document.removeEventListener('visibilitychange', handleWindowFocus);
+    };
   }, []);
+
+  const handleResumePendingCheckout = () => {
+    if (pendingCheckoutSession) {
+      setInitialOrderId(pendingCheckoutSession.orderId);
+      setCheckoutNote(pendingCheckoutSession.note);
+    }
+  };
+
+  const handleDismissPendingCheckout = () => {
+    setPendingCheckoutSession(null);
+    try {
+      localStorage.removeItem('medicos_active_checkout');
+    } catch (e) {}
+  };
 
   const handleAdminLoginSuccess = (token: string) => {
     setAdminToken(token);
@@ -257,6 +331,36 @@ export default function App() {
           isOpen={isPurchasesOpen}
           onClose={() => setIsPurchasesOpen(false)}
         />
+      )}
+
+      {/* Floating Active Order Resume Bar - appears if user came back from payment app and modal closed */}
+      {pendingCheckoutSession && !checkoutNote && (
+        <aside aria-label="Active order notification" className="fixed bottom-4 left-3 right-3 sm:left-auto sm:right-6 sm:max-w-md z-40 bg-stone-900 text-white p-3.5 rounded-2xl shadow-2xl border-2 border-emerald-500/80 flex items-center justify-between gap-3 animate-in slide-in-from-bottom duration-300">
+          <div className="overflow-hidden">
+            <div className="flex items-center gap-1.5 text-[11px] font-black text-emerald-400 uppercase tracking-wider">
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>
+              <span>Pending Order Detected</span>
+            </div>
+            <p className="text-xs text-stone-200 truncate font-bold mt-0.5">
+              {pendingCheckoutSession.note.title}
+            </p>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              onClick={handleResumePendingCheckout}
+              className="px-3.5 py-2 bg-emerald-500 hover:bg-emerald-600 text-stone-900 rounded-xl text-xs font-black shadow-md transition-all active:scale-95 cursor-pointer"
+            >
+              ✅ I Have Paid — Get PDF
+            </button>
+            <button
+              onClick={handleDismissPendingCheckout}
+              className="p-1.5 text-stone-400 hover:text-white cursor-pointer"
+              title="Dismiss"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </aside>
       )}
 
       {/* Footer */}
