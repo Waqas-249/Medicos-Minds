@@ -679,21 +679,16 @@ app.post("/api/checkout/create-order", async (req, res) => {
   // Payee name: strictly matches bank account holder to pass NPCI bank switch verification
   const cleanPayee = (settings.upi_name || "MD KAMRAN ALAM").trim();
 
-  // Clean, neutral transaction note (avoids "Order ord_..." which triggers bank fraud algorithms on personal accounts)
-  const transNote = "Study Notes";
-  const amountStr = Number(note.price).toFixed(2);
+  const priceNum = Number(note.price);
+  const amountStr = priceNum % 1 === 0 ? priceNum.toString() : priceNum.toFixed(2);
 
   // Standard NPCI P2P UPI URI:
   // - pa: literal @ (unencoded) so all UPI app parsers properly recognize the VPA
   // - pn: clean ASCII string matching bank account holder
-  // - am: exact price from database
+  // - am: exact price without decimal zero padding (e.g. 49 instead of 49.00) to prevent bank parser rejections
   // - cu: INR
-  // - tn: safe neutral note ("Study Notes")
-  // REMOVED mc=0000: MCC 0000 flags personal savings accounts as unauthorized merchants, triggering "exceeded the bank limit"
-  // REMOVED tr=: Transaction reference is reserved for acquiring gateways; using it on personal VPAs fails bank limits
-  // REMOVED url=: NPCI blocks unwhitelisted URLs on personal UPI IDs
-  // REPLACED tez://, phonepe://, paytmmp:// with standard upi://pay: Proprietary schemes invoke merchant flows that fail on personal VPAs
-  const upiUri = `upi://pay?pa=${targetUpi}&pn=${encodeURIComponent(cleanPayee)}&am=${amountStr}&cu=INR&tn=${encodeURIComponent(transNote)}`;
+  // Omitted tn parameter: Passing transaction notes on personal VPAs triggers bank risk limits ('limit exceeds')
+  const upiUri = `upi://pay?pa=${targetUpi}&pn=${encodeURIComponent(cleanPayee)}&am=${amountStr}&cu=INR`;
   const p2pUri = `upi://pay?pa=${targetUpi}&pn=${encodeURIComponent(cleanPayee)}`;
 
   // Mobile App-Specific Intent Links: Standard NPCI protocol opens apps directly in P2P mode
@@ -1273,7 +1268,69 @@ app.post("/api/checkout/submit-upi-payment", upload.single("screenshot"), async 
   const screenshotUrl = req.file ? `/api/screenshots/${req.file.filename}` : undefined;
   const submissionTime = new Date().toISOString();
 
-  // Status is changed to pending_verification
+  const settings = readJSON(SETTINGS_FILE, {}) as any;
+  const isInstantMode = settings.verification_mode === "instant";
+
+  if (isInstantMode) {
+    const downloadToken = "dl_" + crypto.randomBytes(24).toString("hex");
+    const verifiedAt = new Date().toISOString();
+    const logId = "txn_log_" + crypto.randomBytes(12).toString("hex");
+
+    const verifiedLog = {
+      id: logId,
+      order_id: order.id,
+      transaction_id: utrToSave || `qr_instant_${order.id}`,
+      gateway: "upi_qr",
+      event: "payment.instant_verified",
+      status: "captured",
+      verified: true,
+      source: "instant_mode",
+      amount: order.amount,
+      currency: "INR",
+      customer_email: customer_email && isValidEmail(customer_email) ? customer_email.trim().toLowerCase() : order.customer_email,
+      customer_phone: order.customer_phone,
+      received_at: verifiedAt,
+      signature_verified: true,
+      raw_event_id: `instant_${Date.now()}`,
+      verified_by: "system_instant_mode",
+      note: "Instant Delivery Mode: Verified and PDF unlocked upon student QR confirmation",
+    };
+
+    const transactionLogs = readJSON<any[]>(TRANSACTION_LOGS_FILE, []);
+    transactionLogs.unshift(verifiedLog);
+    writeJSON(TRANSACTION_LOGS_FILE, transactionLogs);
+
+    order.status = "paid";
+    order.download_token = downloadToken;
+    order.download_token_expires_at = new Date(Date.now() + 48 * 3600 * 1000).toISOString();
+    order.paid_at = verifiedAt;
+    order.verified_at = verifiedAt;
+    order.verified_by = "instant_mode";
+    order.approved_by = "instant_mode";
+    order.transaction_log_id = logId;
+    order.verified_via = "instant_delivery";
+    if (utrToSave) order.utr_number = utrToSave;
+    if (screenshotUrl) order.screenshot_url = screenshotUrl;
+    if (customer_email && isValidEmail(customer_email)) {
+      order.customer_email = customer_email.trim().toLowerCase();
+    }
+
+    orders[orderIndex] = order;
+    writeJSON(ORDERS_FILE, orders);
+
+    // Sync to Firestore
+    saveOrderToFirestore(order).catch(() => {});
+
+    return res.json({
+      success: true,
+      status: "paid",
+      order_id: order.id,
+      download_token: downloadToken,
+      message: "Payment confirmed! Your PDF is unlocked and ready for download.",
+    });
+  }
+
+  // Manual Mode: Status is changed to pending_verification awaiting creator approval
   order.status = "pending_verification";
   if (utrToSave) {
     order.utr_number = utrToSave;
@@ -2467,6 +2524,7 @@ app.put("/api/admin/settings", requireAdmin, (req, res) => {
     support_email, 
     whatsapp_number,
     upi_id,
+    upi_name,
     admin_pin,
     verification_mode
   } = req.body;
@@ -2474,9 +2532,15 @@ app.put("/api/admin/settings", requireAdmin, (req, res) => {
   const currentSettings = readJSON(SETTINGS_FILE, {}) as any;
 
   // Preserve UPI ID permanently - never revert to any hardcoded fallback
-  let cleanUpiId = currentSettings.upi_id || "restorehealthphysio@okaxis";
+  let cleanUpiId = currentSettings.upi_id || "kamranalam8340749923-1@okhdfcbank";
   if (typeof upi_id === "string" && upi_id.trim() !== "") {
     cleanUpiId = upi_id.trim();
+  }
+
+  // Preserve UPI Payee Name
+  let cleanUpiName = currentSettings.upi_name || "MD KAMRAN ALAM";
+  if (typeof upi_name === "string" && upi_name.trim() !== "") {
+    cleanUpiName = upi_name.trim();
   }
 
   // Preserve or update admin PIN
@@ -2495,6 +2559,7 @@ app.put("/api/admin/settings", requireAdmin, (req, res) => {
     support_email: support_email !== undefined ? support_email.trim() : currentSettings.support_email || "",
     whatsapp_number: whatsapp_number !== undefined ? whatsapp_number.trim() : currentSettings.whatsapp_number || "+91 83407 49923",
     upi_id: cleanUpiId,
+    upi_name: cleanUpiName,
     admin_pin: cleanAdminPin,
     verification_mode: cleanVerificationMode,
   };

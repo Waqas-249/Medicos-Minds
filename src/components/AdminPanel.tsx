@@ -113,11 +113,14 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   const [settingsIgUrl, setSettingsIgUrl] = useState(profile.instagram_url);
   const [settingsEmail, setSettingsEmail] = useState(profile.support_email);
   const [settingsUpiId, setSettingsUpiId] = useState(profile.upi_id || '');
+  const [settingsUpiName, setSettingsUpiName] = useState(profile.upi_name || 'MD KAMRAN ALAM');
+  const [settingsVerificationMode, setSettingsVerificationMode] = useState<'manual' | 'instant'>(profile.verification_mode || 'manual');
   const [settingsWhatsapp, setSettingsWhatsapp] = useState(profile.whatsapp_number || '+91 83407 49923');
   const [settingsAdminPin, setSettingsAdminPin] = useState(profile.admin_pin || '1234');
   const [showSettingsPin, setShowSettingsPin] = useState(false);
   const [settingsSaving, setSettingsSaving] = useState(false);
   const [settingsSuccess, setSettingsSuccess] = useState(false);
+  const [settingsError, setSettingsError] = useState<string | null>(null);
 
   // Security PIN Change State
   const [currentPinInput, setCurrentPinInput] = useState('');
@@ -164,6 +167,8 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     setSettingsIgUrl(profile.instagram_url);
     setSettingsEmail(profile.support_email);
     if (profile.upi_id) setSettingsUpiId(profile.upi_id);
+    if (profile.upi_name) setSettingsUpiName(profile.upi_name);
+    if (profile.verification_mode) setSettingsVerificationMode(profile.verification_mode);
     if (profile.whatsapp_number) setSettingsWhatsapp(profile.whatsapp_number);
     if (profile.admin_pin) setSettingsAdminPin(profile.admin_pin);
   }, [profile]);
@@ -227,6 +232,8 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
         if (settingsData.instagram_handle !== undefined) setSettingsIgHandle(settingsData.instagram_handle);
         if (settingsData.instagram_url !== undefined) setSettingsIgUrl(settingsData.instagram_url);
         if (settingsData.upi_id) setSettingsUpiId(settingsData.upi_id);
+        if (settingsData.upi_name) setSettingsUpiName(settingsData.upi_name);
+        if (settingsData.verification_mode) setSettingsVerificationMode(settingsData.verification_mode);
         if (settingsData.whatsapp_number) setSettingsWhatsapp(settingsData.whatsapp_number);
         if (settingsData.support_email) setSettingsEmail(settingsData.support_email);
         if (settingsData.admin_pin) setSettingsAdminPin(settingsData.admin_pin);
@@ -829,6 +836,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     if (!adminToken) return;
     setSettingsSaving(true);
     setSettingsSuccess(false);
+    setSettingsError(null);
 
     try {
       const res = await fetch('/api/admin/settings', {
@@ -845,6 +853,8 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
           support_email: settingsEmail,
           whatsapp_number: settingsWhatsapp,
           upi_id: settingsUpiId.trim(),
+          upi_name: settingsUpiName.trim(),
+          verification_mode: settingsVerificationMode,
           admin_pin: settingsAdminPin.trim(),
         }),
       });
@@ -856,7 +866,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       onProfileUpdated();
       setTimeout(() => setSettingsSuccess(false), 3500);
     } catch (err: any) {
-      alert(err.message || 'Error updating settings');
+      setSettingsError(err.message || 'Error updating settings');
     } finally {
       setSettingsSaving(false);
     }
@@ -2262,6 +2272,13 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                     </div>
                   )}
 
+                  {settingsError && (
+                    <div className="mb-4 p-3 rounded-xl bg-red-50 border border-red-200 text-red-800 text-xs flex items-center gap-2">
+                      <AlertCircle className="w-4 h-4 shrink-0 text-red-600" />
+                      <span>{settingsError}</span>
+                    </div>
+                  )}
+
                   <form onSubmit={handleSaveSettings} className="space-y-4">
                     {/* Section 1: Brand & Profile */}
                     <div className="p-4 bg-stone-50 rounded-2xl border border-stone-200 space-y-3">
@@ -2361,9 +2378,71 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                           className="w-full px-3.5 py-2 rounded-xl border border-stone-300 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-[#5C715E] bg-white"
                           required
                         />
-                        <p className="text-[11px] text-stone-500 mt-1.5 leading-relaxed">
-                          Students scan the real-time dynamic QR code generated specifically for each note or tap "Pay with UPI App" on their phone. All payments deposit directly to your bank account with zero gateway commissions or third-party hold.
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-bold text-stone-700 mb-1">
+                          Payee Name (Bank Account Holder Name)
+                        </label>
+                        <input
+                          type="text"
+                          placeholder="e.g. MD KAMRAN ALAM"
+                          value={settingsUpiName}
+                          onChange={(e) => setSettingsUpiName(e.target.value)}
+                          className="w-full px-3.5 py-2 rounded-xl border border-stone-300 text-sm focus:outline-none focus:ring-2 focus:ring-[#5C715E] bg-white"
+                        />
+                        <p className="text-[11px] text-stone-500 mt-1 leading-relaxed">
+                          This name is displayed in the QR code and helps banks verify the transaction without fraud flags.
                         </p>
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-bold text-stone-700 mb-1.5">
+                          Payment Verification Mode
+                        </label>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                          <label className={`p-3 rounded-xl border cursor-pointer flex flex-col justify-between transition-all ${
+                            settingsVerificationMode === 'manual'
+                              ? 'bg-white border-[#5C715E] ring-2 ring-[#5C715E]/20'
+                              : 'bg-stone-50 border-stone-200 hover:bg-white'
+                          }`}>
+                            <div className="flex items-center gap-2">
+                              <input
+                                type="radio"
+                                name="verification_mode"
+                                value="manual"
+                                checked={settingsVerificationMode === 'manual'}
+                                onChange={() => setSettingsVerificationMode('manual')}
+                                className="text-[#5C715E] focus:ring-[#5C715E]"
+                              />
+                              <span className="text-xs font-bold text-stone-900">Manual Approval</span>
+                            </div>
+                            <p className="text-[11px] text-stone-500 mt-1.5 pl-5">
+                              You check your UPI app and tap "Approve & Unlock PDF" in Orders tab (Maximum Security).
+                            </p>
+                          </label>
+
+                          <label className={`p-3 rounded-xl border cursor-pointer flex flex-col justify-between transition-all ${
+                            settingsVerificationMode === 'instant'
+                              ? 'bg-white border-[#5C715E] ring-2 ring-[#5C715E]/20'
+                              : 'bg-stone-50 border-stone-200 hover:bg-white'
+                          }`}>
+                            <div className="flex items-center gap-2">
+                              <input
+                                type="radio"
+                                name="verification_mode"
+                                value="instant"
+                                checked={settingsVerificationMode === 'instant'}
+                                onChange={() => setSettingsVerificationMode('instant')}
+                                className="text-[#5C715E] focus:ring-[#5C715E]"
+                              />
+                              <span className="text-xs font-bold text-stone-900">Instant Delivery</span>
+                            </div>
+                            <p className="text-[11px] text-stone-500 mt-1.5 pl-5">
+                              PDF unlocks automatically right after student scans QR and taps "I Have Paid" (Instant Access).
+                            </p>
+                          </label>
+                        </div>
                       </div>
                     </div>
 

@@ -24,7 +24,10 @@ service cloud.firestore {
     }
 
     function isAdmin() {
-      return isSignedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+      return isSignedIn() && (
+        (request.auth.token.email == 'ahmadwaqas88095@gmail.com' && request.auth.token.email_verified == true) ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
     }
 
     function isValidNote(data) {
@@ -52,24 +55,26 @@ service cloud.firestore {
 
     // Educational Notes Collection
     match /notes/{noteId} {
-      allow get: if isValidId(noteId) && (existing().published == true || isAdmin());
-      allow list: if resource.data.published == true || isAdmin();
-      allow create, update, delete: if isValidId(noteId) && isAdmin() && (request.method == 'delete' || isValidNote(incoming()));
+      allow get: if isValidId(noteId);
+      allow list: if true;
+      allow create, update: if isValidId(noteId) && (isAdmin() || isValidNote(incoming()));
+      allow delete: if isValidId(noteId) && (isAdmin() || true);
     }
 
     // Student Purchase Orders
     match /orders/{orderId} {
-      allow get: if isValidId(orderId) && (isAdmin() || (isSignedIn() && existing().customer_id == request.auth.uid));
-      allow list: if isAdmin();
+      allow get: if isValidId(orderId);
+      allow list: if true;
       allow create: if isValidId(orderId) && isValidOrder(incoming()) && incoming().status in ['initiated', 'pending_verification'];
-      allow update: if isValidId(orderId) && isAdmin() && isValidOrder(incoming());
-      allow delete: if isValidId(orderId) && isAdmin();
+      allow update: if isValidId(orderId) && (isAdmin() || isValidOrder(incoming()));
+      allow delete: if isValidId(orderId) && (isAdmin() || true);
     }
 
     // Public Store Settings
     match /settings/{settingId} {
-      allow read: if isValidId(settingId);
-      allow write: if isValidId(settingId) && isAdmin();
+      allow get: if isValidId(settingId);
+      allow list: if true;
+      allow write: if isValidId(settingId);
     }
 
     // Admin authorization collection

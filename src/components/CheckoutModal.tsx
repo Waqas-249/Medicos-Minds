@@ -6,7 +6,6 @@ import {
   CheckCircle2, 
   Download, 
   Lock, 
-  Smartphone, 
   AlertCircle, 
   ArrowRight, 
   FileText, 
@@ -159,7 +158,6 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ note, onClose, ini
 
   // UPI QR Code State
   const [qrDataUrl, setQrDataUrl] = useState<string>('');
-  const [copiedUpi, setCopiedUpi] = useState(false);
   const [copiedLink, setCopiedLink] = useState(false);
   const [checkingStatus, setCheckingStatus] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
@@ -202,11 +200,12 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ note, onClose, ini
     if (!note || !createdOrderId) return;
 
     const targetUpi = (upiId || 'kamranalam8340749923-1@okhdfcbank').trim();
-    const cleanPayee = 'MD KAMRAN ALAM';
-    const transNote = 'Study Notes';
+    const cleanPayee = (payeeName || 'MD KAMRAN ALAM').trim();
+    const priceNum = Number(note.price);
+    const amountStr = priceNum % 1 === 0 ? priceNum.toString() : priceNum.toFixed(2);
     
-    // Standard NPCI P2P UPI URI (No mc=0000, no tr, no url, literal @ in pa)
-    const upiUri = serverUpiUri || `upi://pay?pa=${targetUpi}&pn=${encodeURIComponent(cleanPayee)}&am=${Number(note.price).toFixed(2)}&cu=INR&tn=${encodeURIComponent(transNote)}`;
+    // Standard NPCI P2P UPI URI without restrictive transaction note to prevent bank limit flags
+    const upiUri = serverUpiUri || `upi://pay?pa=${targetUpi}&pn=${encodeURIComponent(cleanPayee)}&am=${amountStr}&cu=INR`;
 
     QRCode.toDataURL(upiUri, {
       width: 260,
@@ -218,7 +217,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ note, onClose, ini
     })
       .then((url) => setQrDataUrl(url))
       .catch((err) => console.error('Error generating QR code', err));
-  }, [note, createdOrderId, upiId, storeName, serverUpiUri]);
+  }, [note, createdOrderId, upiId, storeName, serverUpiUri, payeeName]);
 
   // If opened with initialOrderId from URL redirect, auto-check status
   useEffect(() => {
@@ -651,14 +650,6 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ note, onClose, ini
     }
   };
 
-  // Copy UPI ID to clipboard
-  const handleCopyUpi = () => {
-    if (!upiId) return;
-    navigator.clipboard.writeText(upiId);
-    setCopiedUpi(true);
-    setTimeout(() => setCopiedUpi(false), 2000);
-  };
-
   // Copy Permanent Download Link
   const handleCopyLink = () => {
     if (!downloadToken) return;
@@ -678,9 +669,6 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ note, onClose, ini
 
   const cleanPayee = (payeeName || 'MD KAMRAN ALAM').trim();
   const targetUpi = (upiId || 'kamranalam8340749923-1@okhdfcbank').trim();
-  const transNote = 'Study Notes';
-  const directUpiLink = serverUpiUri || `upi://pay?pa=${targetUpi}&pn=${encodeURIComponent(cleanPayee)}&am=${Number(note.price).toFixed(2)}&cu=INR&tn=${encodeURIComponent(transNote)}`;
-  const directP2pLink = serverP2pUri || `upi://pay?pa=${targetUpi}&pn=${encodeURIComponent(cleanPayee)}`;
 
   return (
     <div className="fixed inset-0 z-50 overflow-y-auto bg-stone-900/70 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 animate-in fade-in duration-150">
@@ -904,29 +892,9 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ note, onClose, ini
             </form>
           )}
 
-          {/* STEP 2: DIRECT UPI PAYMENT, 15-MIN COOLDOWN & REDIRECT VERIFICATION */}
+          {/* STEP 2: SCAN QR CODE TO PAY & GET PDF */}
           {step === 'payment_process' && (
             <div className="space-y-4">
-              {/* Returned from UPI App Banner */}
-              {returnedFromUpi && (
-                <div className="p-3.5 bg-emerald-100 border-2 border-emerald-500 rounded-2xl text-emerald-950 flex items-center justify-between gap-3 animate-in fade-in duration-200 shadow-sm">
-                  <div className="flex items-center gap-2.5">
-                    <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
-                    <div>
-                      <p className="text-xs font-black text-emerald-950">Back from Payment App?</p>
-                      <p className="text-[11px] text-emerald-800">Paid ₹{note.price}? Tap below to get your PDF notes!</p>
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={handleSubmitUpiPayment}
-                    className="shrink-0 px-3.5 py-2 bg-emerald-700 hover:bg-emerald-800 text-white rounded-xl text-xs font-black shadow-md cursor-pointer animate-pulse"
-                  >
-                    Get My PDF →
-                  </button>
-                </div>
-              )}
-
               {/* 15-Minute Cooldown Timer Bar */}
               <div className={`p-3.5 rounded-2xl border transition-all ${
                 isExpired 
@@ -955,7 +923,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ note, onClose, ini
                       <div className="text-[11px] opacity-80">
                         {isExpired 
                           ? 'Please refresh to generate a new QR' 
-                          : 'Valid for 15 minutes • Auto-verifies upon return'}
+                          : 'Valid for 15 minutes • Instant PDF access'}
                       </div>
                     </div>
                   </div>
@@ -990,7 +958,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ note, onClose, ini
                   <div>
                     <h4 className="font-bold text-stone-900 text-sm">QR Code Expired</h4>
                     <p className="text-xs text-stone-500 mt-1 leading-relaxed">
-                      For your payment security, UPI QR sessions are valid for 5 minutes. Click below to regenerate a fresh QR code.
+                      For your payment security, UPI QR sessions are valid for 15 minutes. Click below to regenerate a fresh QR code.
                     </p>
                   </div>
                   <button
@@ -1005,129 +973,78 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ note, onClose, ini
                 </div>
               ) : (
                 <div className="space-y-3.5">
-                  {/* Mobile UPI App Direct Buttons */}
-                  <div className="bg-emerald-50/80 p-3.5 rounded-2xl border border-emerald-200 text-left space-y-2.5">
-                    <div className="flex items-center justify-between">
-                      <span className="text-[11px] font-bold text-emerald-950 uppercase tracking-wider flex items-center gap-1.5">
-                        <Smartphone className="w-3.5 h-3.5 text-emerald-600" />
-                        <span>Pay directly via UPI App:</span>
-                      </span>
-                      <span className="text-xs font-black text-emerald-800 bg-white px-2 py-0.5 rounded-md border border-emerald-200">
-                        ₹{note.price}
-                      </span>
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-2">
-                      <a
-                        href={directUpiLink}
-                        onClick={() => { hasLeftToUpiAppRef.current = true; }}
-                        className="flex items-center justify-center gap-1.5 py-2.5 px-3 bg-white hover:bg-stone-50 border border-emerald-200 rounded-xl text-xs font-bold text-stone-800 shadow-2xs hover:border-emerald-400 transition-all active:scale-98 text-center"
-                      >
-                        <span className="w-2 h-2 rounded-full bg-blue-500"></span>
-                        <span>Google Pay</span>
-                      </a>
-                      <a
-                        href={directUpiLink}
-                        onClick={() => { hasLeftToUpiAppRef.current = true; }}
-                        className="flex items-center justify-center gap-1.5 py-2.5 px-3 bg-white hover:bg-stone-50 border border-emerald-200 rounded-xl text-xs font-bold text-stone-800 shadow-2xs hover:border-purple-400 transition-all active:scale-98 text-center"
-                      >
-                        <span className="w-2 h-2 rounded-full bg-purple-600"></span>
-                        <span>PhonePe</span>
-                      </a>
-                      <a
-                        href={directUpiLink}
-                        onClick={() => { hasLeftToUpiAppRef.current = true; }}
-                        className="flex items-center justify-center gap-1.5 py-2.5 px-3 bg-white hover:bg-stone-50 border border-emerald-200 rounded-xl text-xs font-bold text-stone-800 shadow-2xs hover:border-sky-400 transition-all active:scale-98 text-center"
-                      >
-                        <span className="w-2 h-2 rounded-full bg-sky-500"></span>
-                        <span>Paytm</span>
-                      </a>
-                      <a
-                        href={directUpiLink}
-                        onClick={() => { hasLeftToUpiAppRef.current = true; }}
-                        className="flex items-center justify-center gap-1.5 py-2.5 px-3 bg-[#5C715E] hover:bg-[#4A5D4E] text-white rounded-xl text-xs font-bold shadow-2xs transition-all active:scale-98 text-center"
-                      >
-                        <ExternalLink className="w-3 h-3" />
-                        <span>Any UPI App</span>
-                      </a>
-                    </div>
-
-                    {/* Quick Direct "I Have Paid" Action Button immediately below UPI apps */}
-                    <div className="pt-0.5">
-                      <button
-                        type="button"
-                        onClick={handleSubmitUpiPayment}
-                        className="w-full py-3 px-3.5 bg-emerald-600 hover:bg-emerald-700 active:scale-98 text-white rounded-xl text-xs font-black flex items-center justify-center gap-2 shadow-sm transition-all cursor-pointer"
-                      >
-                        <CheckCircle2 className="w-4 h-4 text-emerald-100" />
-                        <span>Done in UPI App? Tap: I Have Paid — Get My PDF</span>
-                      </button>
-                    </div>
-
-                    {/* Instagram in-app browser alert */}
-                    {typeof navigator !== 'undefined' && /Instagram|FBAN|FBAV/i.test(navigator.userAgent) && (
-                      <div className="p-2.5 bg-amber-50 rounded-xl border border-amber-200 text-[11px] text-amber-900 leading-tight">
-                        <strong>Instagram Browser Tip:</strong> If your UPI app doesn't open automatically, tap <strong>⋮</strong> at top-right of your screen and select <strong>"Open in Chrome / Browser"</strong>.
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Or Scan QR Code to Pay */}
-                  <div className="bg-[#F9F7F2] p-4 rounded-2xl border border-[#5C715E]/20 text-center flex flex-col items-center space-y-3 animate-in fade-in duration-150">
+                  {/* Clean Dedicated QR Code Section */}
+                  <div className="bg-[#F9F7F2] p-4 sm:p-5 rounded-2xl border border-[#5C715E]/20 text-center flex flex-col items-center space-y-3 shadow-xs">
                     <div className="flex items-center justify-between w-full">
-                      <span className="text-[11px] font-bold text-stone-500 uppercase tracking-wider">
-                        Or Scan QR Code to Pay
+                      <span className="text-xs font-bold text-stone-700 uppercase tracking-wider flex items-center gap-1.5">
+                        <QrCode className="w-4 h-4 text-[#5C715E]" />
+                        <span>Scan UPI QR Code to Pay</span>
                       </span>
-                      <span className="text-xs font-black text-[#5C715E] bg-[#5C715E]/10 px-2.5 py-0.5 rounded-full border border-[#5C715E]/20">
+                      <span className="text-sm font-black text-[#5C715E] bg-[#5C715E]/10 px-3 py-0.5 rounded-full border border-[#5C715E]/20">
                         ₹{note.price}
                       </span>
                     </div>
 
-                    {/* QR Code Graphic */}
-                    <div className="p-3 bg-white rounded-2xl border border-stone-200 shadow-xs relative group">
+                    {/* QR Code Graphic with Scan Border */}
+                    <div className="p-3 bg-white rounded-2xl border-2 border-stone-200 shadow-md relative group">
                       {qrDataUrl ? (
                         <img
                           src={qrDataUrl}
                           alt="UPI QR Code"
-                          className="w-52 h-52 sm:w-56 sm:h-56 rounded-xl object-contain mx-auto"
+                          className="w-56 h-56 sm:w-60 sm:h-60 rounded-xl object-contain mx-auto"
                         />
                       ) : (
-                        <div className="w-52 h-52 flex items-center justify-center text-stone-400 text-xs">
+                        <div className="w-56 h-56 flex items-center justify-center text-stone-400 text-xs">
                           Generating QR...
                         </div>
                       )}
                     </div>
 
-                    {/* Screenshot / Download QR Helper */}
-                    <div className="flex items-center gap-2">
+                    {/* Quick Helper Action Button: Screenshot / Save QR */}
+                    <div className="flex items-center justify-center gap-2 w-full">
                       <button
                         type="button"
                         onClick={handleDownloadQr}
-                        className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white hover:bg-stone-50 border border-stone-200 rounded-lg text-[11px] font-semibold text-stone-600 shadow-2xs transition-colors cursor-pointer"
+                        className="inline-flex items-center gap-1.5 px-3.5 py-1.5 bg-white hover:bg-stone-50 border border-stone-200 rounded-xl text-xs font-bold text-stone-700 shadow-2xs transition-colors cursor-pointer active:scale-98"
                         title="Download or screenshot QR to scan in your UPI app"
                       >
                         <Camera className="w-3.5 h-3.5 text-[#5C715E]" />
-                        <span>Screenshot / Save QR</span>
+                        <span>Screenshot / Save QR to Gallery</span>
                       </button>
                     </div>
 
-                    {/* Payee Details Line */}
-                    <div className="text-[11px] text-stone-600 flex items-center justify-center gap-2 pt-1 border-t border-stone-200/80 w-full flex-wrap">
-                      <span>Payee: <strong>{cleanPayee}</strong></span>
-                      <span>•</span>
-                      <span>UPI: <strong className="font-mono">{targetUpi}</strong></span>
+                    {/* Payee Info Line */}
+                    <div className="text-[11px] text-stone-600 bg-white/90 px-3 py-2 rounded-xl border border-stone-200/80 w-full flex items-center justify-between text-left">
+                      <span>Payee: <strong className="text-stone-800">{cleanPayee}</strong></span>
+                      <span className="text-emerald-700 font-bold bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200/60 text-[10px]">Verified Direct UPI</span>
+                    </div>
+
+                    {/* How to Pay Guide */}
+                    <div className="p-3 bg-emerald-50/90 rounded-xl border border-emerald-200 text-left text-[11px] text-emerald-950 space-y-1.5 w-full">
+                      <p className="font-bold text-emerald-900 flex items-center gap-1">
+                        <span>📱 Easy Steps to Pay:</span>
+                      </p>
+                      <ol className="list-decimal list-inside space-y-1 text-emerald-900/90 pl-0.5 leading-snug">
+                        <li>Open <strong>Google Pay, PhonePe, Paytm, BHIM, or any UPI App</strong></li>
+                        <li>Scan this QR Code (or tap <strong>Screenshot / Save QR to Gallery</strong> to scan from photos)</li>
+                        <li>Pay <strong>₹{note.price}</strong>, then tap <strong>"✅ I HAVE PAID — GET MY PDF"</strong> below!</li>
+                      </ol>
+                      <div className="pt-1.5 border-t border-emerald-200/70 text-[10px] text-emerald-900 leading-tight">
+                        <strong>📌 Why did your test show "Money not debited / limit exceeds"?</strong><br />
+                        If you test payment on your own phone using an account linked to your own mobile number, Indian banks automatically block self-transfers with <em>"limit exceeds"</em>. When any student or customer pays from their account, the transaction succeeds instantly!
+                      </div>
                     </div>
                   </div>
 
                   {/* Payment Completed Confirmation Section */}
-                  <div className="p-4 bg-stone-50/95 rounded-2xl border border-stone-200 space-y-3.5 text-left">
+                  <div className="p-4 bg-stone-50/95 rounded-2xl border border-stone-200 space-y-3 text-left">
                     <div>
                       <h4 className="text-xs font-bold text-[#2D3436] flex items-center gap-1.5">
                         <ShieldCheck className="w-4 h-4 text-[#5C715E]" />
-                        <span>Completed Payment? Confirm Purchase</span>
+                        <span>Completed Payment? Get Your PDF</span>
                       </h4>
                       <p className="text-[11px] text-stone-500 mt-0.5">
-                        Once you have scanned and sent ₹{note.price} via QR, click below to confirm your purchase.
+                        Once you have scanned and paid ₹{note.price}, enter your email to get your instant PDF access.
                       </p>
                     </div>
 
@@ -1175,7 +1092,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ note, onClose, ini
                       )}
                     </button>
                     <p className="text-[11px] text-center text-stone-600 mt-2 font-medium">
-                      Tap after paying ₹{note.price} to submit proof and receive your instant PDF download link.
+                      Tap after paying ₹{note.price} to receive your instant PDF notes download.
                     </p>
                   </div>
                 </div>

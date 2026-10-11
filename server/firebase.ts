@@ -7,6 +7,8 @@ import {
   deleteDoc,
   collection,
   getDocs,
+  query,
+  where,
   Firestore,
 } from "firebase/firestore";
 import fs from "fs";
@@ -45,15 +47,16 @@ export async function fetchAllNotesFromFirestore(): Promise<any[]> {
   if (!db) return [];
   try {
     const colRef = collection(db, "notes");
-    const snapshot = await getDocs(colRef);
+    const q = query(colRef, where("published", "==", true));
+    const snapshot = await getDocs(q);
     const notes: any[] = [];
     snapshot.forEach((d) => {
       notes.push(d.data());
     });
-    console.log(`[FIREBASE] Retrieved ${notes.length} notes from Firestore cloud storage.`);
+    console.log(`[FIREBASE] Retrieved ${notes.length} published notes from Firestore cloud storage.`);
     return notes;
   } catch (err: any) {
-    console.error("[FIREBASE] Error fetching notes from Firestore:", err?.message || err);
+    console.warn("[FIREBASE] Notice fetching notes from Firestore:", err?.message || err);
     return [];
   }
 }

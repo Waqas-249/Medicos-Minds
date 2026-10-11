@@ -1,5 +1,22 @@
 [
   {
+    "id": "txn_log_65c93374c5321760bc6eb9cd",
+    "order_id": "ord_1791706418571_u5u1r",
+    "transaction_id": "adm_appr_1791706441312",
+    "gateway": "admin_verified",
+    "event": "admin.manual_approval",
+    "status": "verified",
+    "verified": true,
+    "source": "admin_verified",
+    "amount": 8,
+    "currency": "INR",
+    "customer_email": "student@gmail.com",
+    "customer_phone": "9876543210",
+    "verified_by": "admin",
+    "received_at": "2026-10-11T08:14:01.312Z",
+    "note": "Manually verified by creator against bank/UPI statement."
+  },
+  {
     "id": "txn_log_52ffd6b36dbd0b760cb3bc92",
     "order_id": "ord_1789573824676_v771g",
     "transaction_id": "adm_appr_1789573824845",

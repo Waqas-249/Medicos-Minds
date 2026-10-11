@@ -22,6 +22,7 @@ export interface CreatorProfile {
   support_email: string;
   whatsapp_number?: string;
   upi_id?: string;
+  upi_name?: string;
   admin_pin?: string;
   verification_mode?: 'manual' | 'instant';
 }
