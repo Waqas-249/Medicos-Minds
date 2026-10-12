@@ -174,6 +174,37 @@
         }
       },
       "required": ["name"]
+    },
+    "NoteImage": {
+      "title": "NoteImage",
+      "description": "Base64 encoded note cover and preview images stored for persistence across container instances.",
+      "type": "object",
+      "properties": {
+        "filename": {
+          "type": "string",
+          "description": "Unique image filename.",
+          "maxLength": 200
+        },
+        "contentType": {
+          "type": "string",
+          "description": "MIME type (image/png, image/jpeg, image/webp).",
+          "maxLength": 50
+        },
+        "data": {
+          "type": "string",
+          "description": "Base64 encoded image string."
+        },
+        "size": {
+          "type": "number",
+          "description": "File size in bytes."
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "ISO timestamp of upload.",
+          "maxLength": 64
+        }
+      },
+      "required": ["filename", "data"]
     }
   },
   "firestore": {
@@ -188,6 +219,10 @@
     "/settings/store": {
       "schema": { "$ref": "#/entities/StoreSettings" },
       "description": "Global store configuration and creator settings."
+    },
+    "/note_images/{imageId}": {
+      "schema": { "$ref": "#/entities/NoteImage" },
+      "description": "Permanent storage of uploaded note cover thumbnails and inside preview page images."
     }
   }
 }

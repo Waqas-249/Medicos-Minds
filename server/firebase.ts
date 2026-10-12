@@ -137,3 +137,190 @@ export async function getFirebaseHealth(): Promise<{ configured: boolean; connec
     return { configured: true, connected: false, count: 0 };
   }
 }
+
+/**
+ * Save an uploaded image to Firestore for permanent persistence
+ */
+export async function saveImageToFirestore(
+  filename: string,
+  buffer: Buffer,
+  contentType: string = "image/png",
+  noteId: string = "",
+  slot: string = ""
+): Promise<boolean> {
+  if (!db || !filename || !buffer) return false;
+  try {
+    const sanitizedId = filename.replace(/[^a-zA-Z0-9_-]/g, "_");
+    const base64Data = buffer.toString("base64");
+    const chunkSize = 400 * 1024; // 400 KB per chunk (safe within 1MB Firestore limit)
+
+    if (base64Data.length <= chunkSize) {
+      // Single document
+      const docRef = doc(db, "note_images", sanitizedId);
+      await setDoc(docRef, {
+        filename,
+        contentType,
+        data: base64Data,
+        size: buffer.length,
+        noteId: noteId || "",
+        slot: slot || "",
+        chunked: false,
+        updatedAt: new Date().toISOString(),
+      });
+    } else {
+      // Chunked document
+      const totalChunks = Math.ceil(base64Data.length / chunkSize);
+      const metaDocRef = doc(db, "note_images", sanitizedId);
+      await setDoc(metaDocRef, {
+        filename,
+        contentType,
+        chunked: true,
+        totalChunks,
+        size: buffer.length,
+        noteId: noteId || "",
+        slot: slot || "",
+        updatedAt: new Date().toISOString(),
+      });
+
+      for (let i = 0; i < totalChunks; i++) {
+        const chunkDocRef = doc(db, "note_images", `${sanitizedId}_part_${i}`);
+        const slice = base64Data.slice(i * chunkSize, (i + 1) * chunkSize);
+        await setDoc(chunkDocRef, {
+          parentFilename: filename,
+          partIndex: i,
+          data: slice,
+          updatedAt: new Date().toISOString(),
+        });
+      }
+    }
+
+    console.log(`[FIREBASE IMAGE PERSISTENCE] Persisted image "${filename}" (${buffer.length} bytes) to Firestore.`);
+    return true;
+  } catch (err: any) {
+    console.error(`[FIREBASE IMAGE PERSISTENCE] Error saving image ${filename}:`, err?.message || err);
+    return false;
+  }
+}
+
+/**
+ * Fetch an image from Firestore by its filename
+ */
+export async function getImageFromFirestore(
+  filename: string
+): Promise<{ data: string; contentType: string } | null> {
+  if (!db || !filename) return null;
+  try {
+    const sanitizedId = filename.replace(/[^a-zA-Z0-9_-]/g, "_");
+    const docRef = doc(db, "note_images", sanitizedId);
+    const snap = await getDoc(docRef);
+
+    if (!snap.exists()) {
+      return null;
+    }
+
+    const docData = snap.data();
+    if (!docData) return null;
+
+    if (!docData.chunked) {
+      return {
+        data: docData.data,
+        contentType: docData.contentType || "image/png",
+      };
+    }
+
+    // Reconstruct chunked image
+    const totalChunks = docData.totalChunks || 1;
+    let fullBase64 = "";
+
+    for (let i = 0; i < totalChunks; i++) {
+      const partDocRef = doc(db, "note_images", `${sanitizedId}_part_${i}`);
+      const partSnap = await getDoc(partDocRef);
+      if (partSnap.exists()) {
+        const partData = partSnap.data();
+        fullBase64 += partData?.data || "";
+      }
+    }
+
+    return {
+      data: fullBase64,
+      contentType: docData.contentType || "image/png",
+    };
+  } catch (err: any) {
+    console.error(`[FIREBASE IMAGE RETRIEVAL] Error fetching image ${filename}:`, err?.message || err);
+    return null;
+  }
+}
+
+/**
+ * Restore all saved images from Firestore to the local directory on disk
+ */
+export async function restoreAllImagesFromFirestore(targetDir: string): Promise<number> {
+  if (!db || !targetDir) return 0;
+  let restoredCount = 0;
+  try {
+    const colRef = collection(db, "note_images");
+    const snapshot = await getDocs(colRef);
+
+    for (const docSnap of snapshot.docs) {
+      const docData = docSnap.data();
+      if (!docData || !docData.filename) continue;
+
+      const filename = docData.filename;
+      const filePath = path.join(targetDir, filename);
+
+      // If file already exists locally, skip
+      if (fs.existsSync(filePath)) {
+        continue;
+      }
+
+      if (!docData.chunked && docData.data) {
+        try {
+          fs.writeFileSync(filePath, Buffer.from(docData.data, "base64"));
+          restoredCount++;
+        } catch (we) {}
+      } else if (docData.chunked) {
+        // Fetch full chunked image
+        const img = await getImageFromFirestore(filename);
+        if (img && img.data) {
+          try {
+            fs.writeFileSync(filePath, Buffer.from(img.data, "base64"));
+            restoredCount++;
+          } catch (we) {}
+        }
+      }
+    }
+
+    if (restoredCount > 0) {
+      console.log(`[FIREBASE IMAGE RESTORE] Restored ${restoredCount} note images from cloud to disk cache.`);
+    }
+  } catch (err: any) {
+    console.warn(`[FIREBASE IMAGE RESTORE] Notice restoring images:`, err?.message || err);
+  }
+  return restoredCount;
+}
+
+/**
+ * Delete an image from Firestore
+ */
+export async function deleteImageFromFirestore(filename: string): Promise<void> {
+  if (!db || !filename) return;
+  try {
+    const sanitizedId = filename.replace(/[^a-zA-Z0-9_-]/g, "_");
+    const docRef = doc(db, "note_images", sanitizedId);
+    const snap = await getDoc(docRef);
+    if (snap.exists()) {
+      const docData = snap.data();
+      if (docData?.chunked && docData?.totalChunks) {
+        for (let i = 0; i < docData.totalChunks; i++) {
+          try {
+            await deleteDoc(doc(db, "note_images", `${sanitizedId}_part_${i}`));
+          } catch (e) {}
+        }
+      }
+    }
+    await deleteDoc(docRef);
+    console.log(`[FIREBASE IMAGE PERSISTENCE] Deleted image "${filename}" from Firestore.`);
+  } catch (err: any) {
+    console.warn(`[FIREBASE IMAGE PERSISTENCE] Notice deleting image ${filename}:`, err?.message || err);
+  }
+}

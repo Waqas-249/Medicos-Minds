@@ -23,6 +23,10 @@ import {
   syncAllNotesToFirestore,
   saveOrderToFirestore,
   getFirebaseHealth,
+  saveImageToFirestore,
+  getImageFromFirestore,
+  restoreAllImagesFromFirestore,
+  deleteImageFromFirestore,
 } from "./server/firebase";
 
 const app = express();
@@ -115,6 +119,11 @@ if (isFirebaseConfigured()) {
     }
   }).catch((err) => {
     console.error("[FIREBASE SYNC]", err?.message || err);
+  });
+
+  // Restore all uploaded note images from Firestore cloud storage to local disk cache
+  restoreAllImagesFromFirestore(COVERS_DIR).catch((err) => {
+    console.error("[FIREBASE IMAGE RESTORE]", err?.message || err);
   });
 }
 
@@ -254,14 +263,62 @@ const upload = multer({
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
-// Serve cover and preview images publicly
-app.use("/api/covers", express.static(COVERS_DIR));
-app.get("/api/covers/:filename", (req, res) => {
+// Serve cover and preview images publicly with permanent Firestore Cloud fallback
+app.get("/api/covers/:filename", async (req, res) => {
   const filename = path.basename(req.params.filename);
   const filePath = path.join(COVERS_DIR, filename);
+
+  let buffer: Buffer | null = null;
+  let contentType = "";
+
   if (fs.existsSync(filePath)) {
-    return res.sendFile(filePath);
+    try {
+      buffer = fs.readFileSync(filePath);
+    } catch (e) {}
   }
+
+  // If not on disk (e.g. after container restart / fresh instance), restore from Firestore Cloud
+  if (!buffer) {
+    try {
+      const imgDoc = await getImageFromFirestore(filename);
+      if (imgDoc && imgDoc.data) {
+        buffer = Buffer.from(imgDoc.data, "base64");
+        contentType = imgDoc.contentType || "";
+        // Cache to local disk for high-speed subsequent reads
+        try {
+          fs.writeFileSync(filePath, buffer);
+        } catch (we) {}
+      }
+    } catch (err: any) {
+      console.warn(`[IMAGE FETCH] Failed to restore image ${filename} from cloud:`, err?.message || err);
+    }
+  }
+
+  if (buffer) {
+    if (!contentType) {
+      const headStr = buffer.slice(0, 120).toString("utf8");
+      if (headStr.includes("<svg") || headStr.includes("<?xml")) {
+        contentType = "image/svg+xml";
+      } else if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4E && buffer[3] === 0x47) {
+        contentType = "image/png";
+      } else if (buffer[0] === 0xFF && buffer[1] === 0xD8) {
+        contentType = "image/jpeg";
+      } else if (buffer.slice(0, 4).toString() === "RIFF" && buffer.slice(8, 12).toString() === "WEBP") {
+        contentType = "image/webp";
+      } else if (filename.endsWith(".png")) {
+        contentType = "image/png";
+      } else if (filename.endsWith(".jpg") || filename.endsWith(".jpeg")) {
+        contentType = "image/jpeg";
+      } else {
+        contentType = "image/png";
+      }
+    }
+
+    res.setHeader("Content-Type", contentType);
+    res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+    return res.send(buffer);
+  }
+
   res.status(404).json({ error: "Image not found" });
 });
 
@@ -1950,16 +2007,16 @@ app.post("/api/admin/restore-notes", requireAdmin, (req, res) => {
     }
 
     const currentNotes = readJSON<any[]>(NOTES_FILE, []);
-    const existingIds = new Set(currentNotes.map((n) => n.id));
-
     let restoredCount = 0;
     for (const note of notes) {
       if (note && note.title) {
-        if (!existingIds.has(note.id)) {
+        const existingIdx = currentNotes.findIndex((n) => String(n.id) === String(note.id));
+        if (existingIdx >= 0) {
+          currentNotes[existingIdx] = { ...currentNotes[existingIdx], ...note };
+        } else {
           currentNotes.push(note);
-          existingIds.add(note.id);
-          restoredCount++;
         }
+        restoredCount++;
       }
     }
 
@@ -2067,6 +2124,26 @@ app.post(
 
       // Mirror to Firestore Cloud
       saveNoteToFirestore(newNote).catch(() => {});
+
+      // Persist uploaded cover and preview images permanently to Firestore Cloud
+      if (coverFile) {
+        try {
+          const buf = fs.readFileSync(coverFile.path);
+          saveImageToFirestore(coverFile.filename, buf, coverFile.mimetype || "image/png", noteId, "cover").catch(() => {});
+        } catch (e) {}
+      }
+      if (preview1File) {
+        try {
+          const buf = fs.readFileSync(preview1File.path);
+          saveImageToFirestore(preview1File.filename, buf, preview1File.mimetype || "image/jpeg", noteId, "preview_1").catch(() => {});
+        } catch (e) {}
+      }
+      if (preview2File) {
+        try {
+          const buf = fs.readFileSync(preview2File.path);
+          saveImageToFirestore(preview2File.filename, buf, preview2File.mimetype || "image/jpeg", noteId, "preview_2").catch(() => {});
+        } catch (e) {}
+      }
 
       res.status(201).json(newNote);
     } catch (err: any) {
@@ -2244,6 +2321,34 @@ app.put(
       // Mirror to Firestore Cloud
       saveNoteToFirestore(updatedNote).catch(() => {});
 
+      // Persist any updated cover or preview images permanently to Firestore Cloud
+      if (coverFile) {
+        try {
+          const buf = fs.readFileSync(coverFile.path);
+          saveImageToFirestore(coverFile.filename, buf, coverFile.mimetype || "image/png", existingNote.id, "cover").catch(() => {});
+        } catch (e) {}
+      } else if (remove_cover === "true" && existingNote.cover_image && existingNote.cover_image.startsWith("/api/covers/")) {
+        deleteImageFromFirestore(existingNote.cover_image.replace("/api/covers/", "")).catch(() => {});
+      }
+
+      if (preview1File) {
+        try {
+          const buf = fs.readFileSync(preview1File.path);
+          saveImageToFirestore(preview1File.filename, buf, preview1File.mimetype || "image/jpeg", existingNote.id, "preview_1").catch(() => {});
+        } catch (e) {}
+      } else if (remove_preview_1 === "true" && prev1 && prev1.startsWith("/api/covers/")) {
+        deleteImageFromFirestore(prev1.replace("/api/covers/", "")).catch(() => {});
+      }
+
+      if (preview2File) {
+        try {
+          const buf = fs.readFileSync(preview2File.path);
+          saveImageToFirestore(preview2File.filename, buf, preview2File.mimetype || "image/jpeg", existingNote.id, "preview_2").catch(() => {});
+        } catch (e) {}
+      } else if (remove_preview_2 === "true" && prev2 && prev2.startsWith("/api/covers/")) {
+        deleteImageFromFirestore(prev2.replace("/api/covers/", "")).catch(() => {});
+      }
+
       res.json(updatedNote);
     } catch (err: any) {
       console.error("Error updating note:", err);
@@ -2293,6 +2398,7 @@ app.delete("/api/admin/notes/:id", requireAdmin, (req, res) => {
         fs.unlinkSync(coverPath);
       } catch (e) {}
     }
+    deleteImageFromFirestore(coverFilename).catch(() => {});
   }
 
   // Clean up preview images
@@ -2306,6 +2412,7 @@ app.delete("/api/admin/notes/:id", requireAdmin, (req, res) => {
             fs.unlinkSync(previewPath);
           } catch (e) {}
         }
+        deleteImageFromFirestore(previewFilename).catch(() => {});
       }
     }
   }

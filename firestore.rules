@@ -77,6 +77,14 @@ service cloud.firestore {
       allow write: if isValidId(settingId);
     }
 
+    // Permanent Note Cover & Inside Preview Images
+    match /note_images/{imageId} {
+      allow get: if isValidId(imageId);
+      allow list: if true;
+      allow create, update: if isValidId(imageId);
+      allow delete: if isValidId(imageId);
+    }
+
     // Admin authorization collection
     match /admins/{adminId} {
       allow read: if isSignedIn() && request.auth.uid == adminId;

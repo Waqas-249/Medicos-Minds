@@ -47,6 +47,59 @@ interface AdminPanelProps {
 
 type TabType = 'upload' | 'manage' | 'orders' | 'settings' | 'guide';
 
+// Automatically optimize and compress images on the client before uploading
+// Ensures images fit within cloud storage limits, upload in milliseconds, and retain crystal clear quality
+async function compressImageForUpload(file: File): Promise<File> {
+  if (!file.type.startsWith('image/')) return file;
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = () => {
+        const MAX_WIDTH = 1200;
+        const MAX_HEIGHT = 1600;
+        let width = img.width;
+        let height = img.height;
+
+        if (width > MAX_WIDTH || height > MAX_HEIGHT) {
+          const ratio = Math.min(MAX_WIDTH / width, MAX_HEIGHT / height);
+          width = Math.round(width * ratio);
+          height = Math.round(height * ratio);
+        }
+
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return resolve(file);
+
+        ctx.drawImage(img, 0, 0, width, height);
+        canvas.toBlob(
+          (blob) => {
+            if (blob && (blob.size < file.size || width !== img.width)) {
+              const ext = file.name.endsWith('.png') ? '.png' : '.jpeg';
+              const cleanName = file.name.replace(/\.[^/.]+$/, '') + ext;
+              const compressedFile = new File([blob], cleanName, {
+                type: blob.type || (ext === '.png' ? 'image/png' : 'image/jpeg'),
+                lastModified: Date.now(),
+              });
+              resolve(compressedFile);
+            } else {
+              resolve(file);
+            }
+          },
+          file.type === 'image/png' ? 'image/png' : 'image/jpeg',
+          0.85
+        );
+      };
+      img.onerror = () => resolve(file);
+      img.src = e.target?.result as string;
+    };
+    reader.onerror = () => resolve(file);
+    reader.readAsDataURL(file);
+  });
+}
+
 export const AdminPanel: React.FC<AdminPanelProps> = ({
   isOpen,
   onClose,
@@ -287,33 +340,36 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   };
 
   // Handle Cover File Selection (Slot 1)
-  const handleCoverChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleCoverChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
-      setSelectedCover(file);
-      const url = URL.createObjectURL(file);
+      const optimized = await compressImageForUpload(file);
+      setSelectedCover(optimized);
+      const url = URL.createObjectURL(optimized);
       setCoverPreviewUrl(url);
       setRemoveCover(false);
     }
   };
 
   // Handle Preview 1 File Selection (Slot 2)
-  const handlePreview1Change = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handlePreview1Change = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
-      setSelectedPreview1(file);
-      const url = URL.createObjectURL(file);
+      const optimized = await compressImageForUpload(file);
+      setSelectedPreview1(optimized);
+      const url = URL.createObjectURL(optimized);
       setPreview1Url(url);
       setRemovePreview1(false);
     }
   };
 
   // Handle Preview 2 File Selection (Slot 3)
-  const handlePreview2Change = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handlePreview2Change = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
-      setSelectedPreview2(file);
-      const url = URL.createObjectURL(file);
+      const optimized = await compressImageForUpload(file);
+      setSelectedPreview2(optimized);
+      const url = URL.createObjectURL(optimized);
       setPreview2Url(url);
       setRemovePreview2(false);
     }
