@@ -97,25 +97,47 @@ if (!fs.existsSync(SETTINGS_FILE)) {
   fs.writeFileSync(SETTINGS_FILE, JSON.stringify(defaultSettings, null, 2));
 }
 
-// Automatically sync notes with Firestore cloud database on boot
+// Automatically sync notes with Firestore cloud database on boot (Two-way robust union merge)
 if (isFirebaseConfigured()) {
-  fetchAllNotesFromFirestore().then((fbNotes) => {
-    if (Array.isArray(fbNotes) && fbNotes.length > 0) {
+  fetchAllNotesFromFirestore().then(async (fbNotes) => {
+    try {
       const curNotes = readJSON<any[]>(NOTES_FILE, []);
-      if (fbNotes.length >= curNotes.length) {
-        writeJSON(NOTES_FILE, fbNotes);
-        writeJSON(NOTES_BACKUP_FILE, fbNotes);
-        console.log(`[FIREBASE AUTO-SYNC] Restored ${fbNotes.length} notes from Firestore cloud storage.`);
-      } else if (curNotes.length > fbNotes.length) {
-        syncAllNotesToFirestore(curNotes).catch(() => {});
+      const noteMap = new Map<string, any>();
+
+      // Load existing disk notes
+      for (const n of curNotes) {
+        if (n && n.id) noteMap.set(String(n.id), n);
       }
-    } else {
-      const curNotes = readJSON<any[]>(NOTES_FILE, []);
-      if (curNotes.length > 0) {
-        syncAllNotesToFirestore(curNotes).then(() => {
-          console.log(`[FIREBASE INITIAL SEED] Seeded ${curNotes.length} notes to Firestore cloud.`);
-        }).catch(() => {});
+
+      // Union with Firestore cloud notes (prefer newer updated_at if both exist)
+      if (Array.isArray(fbNotes)) {
+        for (const n of fbNotes) {
+          if (n && n.id) {
+            const existing = noteMap.get(String(n.id));
+            if (!existing) {
+              noteMap.set(String(n.id), n);
+            } else {
+              const curTime = new Date(existing.updated_at || existing.created_at || 0).getTime();
+              const fbTime = new Date(n.updated_at || n.created_at || 0).getTime();
+              noteMap.set(String(n.id), fbTime >= curTime ? n : existing);
+            }
+          }
+        }
       }
+
+      const mergedNotes = Array.from(noteMap.values());
+      writeJSON(NOTES_FILE, mergedNotes);
+      writeJSON(NOTES_BACKUP_FILE, mergedNotes);
+      console.log(`[FIREBASE AUTO-SYNC] Synchronized ${mergedNotes.length} notes (Disk: ${curNotes.length}, Cloud: ${fbNotes?.length || 0}).`);
+
+      // Seed any notes from disk that might be missing in Firestore cloud
+      for (const n of mergedNotes) {
+        if (!fbNotes || !fbNotes.some((fn: any) => String(fn.id) === String(n.id))) {
+          await saveNoteToFirestore(n);
+        }
+      }
+    } catch (err: any) {
+      console.error("[FIREBASE MERGE ERROR]", err?.message || err);
     }
   }).catch((err) => {
     console.error("[FIREBASE SYNC]", err?.message || err);
@@ -1375,8 +1397,12 @@ app.post("/api/checkout/submit-upi-payment", upload.single("screenshot"), async 
     orders[orderIndex] = order;
     writeJSON(ORDERS_FILE, orders);
 
-    // Sync to Firestore
-    saveOrderToFirestore(order).catch(() => {});
+    // Sync to Firestore Cloud and strictly await
+    try {
+      await saveOrderToFirestore(order);
+    } catch (fErr: any) {
+      console.error("[FIRESTORE ORDER SYNC ERROR]:", fErr?.message || fErr);
+    }
 
     return res.json({
       success: true,
@@ -1405,15 +1431,15 @@ app.post("/api/checkout/submit-upi-payment", upload.single("screenshot"), async 
   orders[orderIndex] = order;
   writeJSON(ORDERS_FILE, orders);
 
-  // Sync to Supabase repository if tables are configured
+  // Sync to Firestore Cloud and strictly await
   try {
-    await submitPaymentReference(order.id, utrToSave || '', screenshotUrl);
-  } catch (sbErr: any) {
-    console.log("[SUPABASE SYNC] Note on payment submission:", sbErr?.message || sbErr);
+    await saveOrderToFirestore(order);
+  } catch (fErr: any) {
+    console.error("[FIRESTORE ORDER SYNC ERROR]:", fErr?.message || fErr);
   }
 
-  // Sync to Firestore
-  saveOrderToFirestore(order).catch(() => {});
+  // Mirror to Supabase if configured (non-blocking)
+  submitPaymentReference(order.id, utrToSave || '', screenshotUrl).catch(() => {});
 
   return res.json({
     success: true,
@@ -1999,7 +2025,7 @@ app.get("/api/admin/backup-notes", requireAdmin, (req, res) => {
   });
 });
 
-app.post("/api/admin/restore-notes", requireAdmin, (req, res) => {
+app.post("/api/admin/restore-notes", requireAdmin, async (req, res) => {
   try {
     const { notes } = req.body || {};
     if (!Array.isArray(notes)) {
@@ -2022,7 +2048,11 @@ app.post("/api/admin/restore-notes", requireAdmin, (req, res) => {
 
     writeJSON(NOTES_FILE, currentNotes);
     writeJSON(NOTES_BACKUP_FILE, currentNotes);
-    syncAllNotesToFirestore(currentNotes).catch(() => {});
+    try {
+      await syncAllNotesToFirestore(currentNotes);
+    } catch (sErr: any) {
+      console.error("[RESTORE SYNC ERROR]:", sErr?.message || sErr);
+    }
     console.log(`[ADMIN RESTORE] Restored ${restoredCount} notes from backup. Total notes: ${currentNotes.length}`);
     res.json({ success: true, restored_count: restoredCount, total_notes: currentNotes.length });
   } catch (err: any) {
@@ -2047,7 +2077,7 @@ app.post(
     { name: "preview_1", maxCount: 1 },
     { name: "preview_2", maxCount: 1 },
   ]),
-  (req: any, res: any) => {
+  async (req: any, res: any) => {
     try {
       const { title, description, price, published, uploaded_pdf_file, uploaded_pdf_original_name, uploaded_pdf_size } = req.body;
 
@@ -2117,33 +2147,43 @@ app.post(
       notes.push(newNote);
       writeJSON(NOTES_FILE, notes);
 
-      // Mirror to Supabase if configured
-      saveProduct(newNote, false).catch((err) => {
-        console.log("[SUPABASE PRODUCT SYNC] Note create fallback:", err?.message || err);
-      });
+      // Persist note to Firestore Cloud and strictly AWAIT it before finishing HTTP response
+      try {
+        await saveNoteToFirestore(newNote);
+      } catch (fErr: any) {
+        console.error("[FIRESTORE NOTE PERSISTENCE ERROR]:", fErr?.message || fErr);
+      }
 
-      // Mirror to Firestore Cloud
-      saveNoteToFirestore(newNote).catch(() => {});
-
-      // Persist uploaded cover and preview images permanently to Firestore Cloud
+      // Persist uploaded cover and preview images permanently to Firestore Cloud and strictly AWAIT them
       if (coverFile) {
         try {
           const buf = fs.readFileSync(coverFile.path);
-          saveImageToFirestore(coverFile.filename, buf, coverFile.mimetype || "image/png", noteId, "cover").catch(() => {});
-        } catch (e) {}
+          await saveImageToFirestore(coverFile.filename, buf, coverFile.mimetype || "image/png", noteId, "cover");
+        } catch (e: any) {
+          console.error("[COVER PERSISTENCE ERROR]:", e?.message || e);
+        }
       }
       if (preview1File) {
         try {
           const buf = fs.readFileSync(preview1File.path);
-          saveImageToFirestore(preview1File.filename, buf, preview1File.mimetype || "image/jpeg", noteId, "preview_1").catch(() => {});
-        } catch (e) {}
+          await saveImageToFirestore(preview1File.filename, buf, preview1File.mimetype || "image/jpeg", noteId, "preview_1");
+        } catch (e: any) {
+          console.error("[PREVIEW 1 PERSISTENCE ERROR]:", e?.message || e);
+        }
       }
       if (preview2File) {
         try {
           const buf = fs.readFileSync(preview2File.path);
-          saveImageToFirestore(preview2File.filename, buf, preview2File.mimetype || "image/jpeg", noteId, "preview_2").catch(() => {});
-        } catch (e) {}
+          await saveImageToFirestore(preview2File.filename, buf, preview2File.mimetype || "image/jpeg", noteId, "preview_2");
+        } catch (e: any) {
+          console.error("[PREVIEW 2 PERSISTENCE ERROR]:", e?.message || e);
+        }
       }
+
+      // Mirror to Supabase if configured (optional)
+      saveProduct(newNote, false).catch((err) => {
+        console.log("[SUPABASE PRODUCT SYNC] Note create fallback:", err?.message || err);
+      });
 
       res.status(201).json(newNote);
     } catch (err: any) {
@@ -2163,7 +2203,7 @@ app.put(
     { name: "preview_1", maxCount: 1 },
     { name: "preview_2", maxCount: 1 },
   ]),
-  (req: any, res: any) => {
+  async (req: any, res: any) => {
     try {
       const { id } = req.params;
       const { 
@@ -2313,41 +2353,51 @@ app.put(
       notes[index] = updatedNote;
       writeJSON(NOTES_FILE, notes);
 
-      // Mirror to Supabase if configured
-      saveProduct(updatedNote, true).catch((err) => {
-        console.log("[SUPABASE PRODUCT SYNC] Note update fallback:", err?.message || err);
-      });
+      // Persist updated note to Firestore Cloud and strictly AWAIT it
+      try {
+        await saveNoteToFirestore(updatedNote);
+      } catch (fErr: any) {
+        console.error("[FIRESTORE NOTE UPDATE ERROR]:", fErr?.message || fErr);
+      }
 
-      // Mirror to Firestore Cloud
-      saveNoteToFirestore(updatedNote).catch(() => {});
-
-      // Persist any updated cover or preview images permanently to Firestore Cloud
+      // Persist any updated cover or preview images permanently to Firestore Cloud and strictly AWAIT them
       if (coverFile) {
         try {
           const buf = fs.readFileSync(coverFile.path);
-          saveImageToFirestore(coverFile.filename, buf, coverFile.mimetype || "image/png", existingNote.id, "cover").catch(() => {});
-        } catch (e) {}
+          await saveImageToFirestore(coverFile.filename, buf, coverFile.mimetype || "image/png", existingNote.id, "cover");
+        } catch (e: any) {
+          console.error("[COVER UPDATE ERROR]:", e?.message || e);
+        }
       } else if (remove_cover === "true" && existingNote.cover_image && existingNote.cover_image.startsWith("/api/covers/")) {
-        deleteImageFromFirestore(existingNote.cover_image.replace("/api/covers/", "")).catch(() => {});
+        await deleteImageFromFirestore(existingNote.cover_image.replace("/api/covers/", ""));
       }
 
       if (preview1File) {
         try {
           const buf = fs.readFileSync(preview1File.path);
-          saveImageToFirestore(preview1File.filename, buf, preview1File.mimetype || "image/jpeg", existingNote.id, "preview_1").catch(() => {});
-        } catch (e) {}
+          await saveImageToFirestore(preview1File.filename, buf, preview1File.mimetype || "image/jpeg", existingNote.id, "preview_1");
+        } catch (e: any) {
+          console.error("[PREVIEW 1 UPDATE ERROR]:", e?.message || e);
+        }
       } else if (remove_preview_1 === "true" && prev1 && prev1.startsWith("/api/covers/")) {
-        deleteImageFromFirestore(prev1.replace("/api/covers/", "")).catch(() => {});
+        await deleteImageFromFirestore(prev1.replace("/api/covers/", ""));
       }
 
       if (preview2File) {
         try {
           const buf = fs.readFileSync(preview2File.path);
-          saveImageToFirestore(preview2File.filename, buf, preview2File.mimetype || "image/jpeg", existingNote.id, "preview_2").catch(() => {});
-        } catch (e) {}
+          await saveImageToFirestore(preview2File.filename, buf, preview2File.mimetype || "image/jpeg", existingNote.id, "preview_2");
+        } catch (e: any) {
+          console.error("[PREVIEW 2 UPDATE ERROR]:", e?.message || e);
+        }
       } else if (remove_preview_2 === "true" && prev2 && prev2.startsWith("/api/covers/")) {
-        deleteImageFromFirestore(prev2.replace("/api/covers/", "")).catch(() => {});
+        await deleteImageFromFirestore(prev2.replace("/api/covers/", ""));
       }
+
+      // Mirror to Supabase if configured (optional)
+      saveProduct(updatedNote, true).catch((err) => {
+        console.log("[SUPABASE PRODUCT SYNC] Note update fallback:", err?.message || err);
+      });
 
       res.json(updatedNote);
     } catch (err: any) {
@@ -2358,7 +2408,7 @@ app.put(
 );
 
 // Admin: Delete Note
-app.delete("/api/admin/notes/:id", requireAdmin, (req, res) => {
+app.delete("/api/admin/notes/:id", requireAdmin, async (req, res) => {
   const { id } = req.params;
   const notes = readJSON<any[]>(NOTES_FILE, []);
   const index = notes.findIndex((n) => String(n.id).trim() === String(id).trim());
@@ -2371,13 +2421,12 @@ app.delete("/api/admin/notes/:id", requireAdmin, (req, res) => {
   writeJSON(NOTES_FILE, notes);
   console.log(`[ADMIN] Note deleted successfully: ID ${id}, Title: ${deletedNote.title}`);
 
-  // Mirror deletion to Supabase if configured
-  deleteProduct(id).catch((err) => {
-    console.log("[SUPABASE PRODUCT DELETE] Fallback:", err?.message || err);
-  });
-
-  // Mirror deletion to Firestore Cloud
-  deleteNoteFromFirestore(id).catch(() => {});
+  // Delete from Firestore Cloud and strictly AWAIT it
+  try {
+    await deleteNoteFromFirestore(id);
+  } catch (err: any) {
+    console.error("[FIRESTORE NOTE DELETE ERROR]:", err?.message || err);
+  }
 
   // Clean up PDF file
   if (deletedNote.pdf_file) {
@@ -2389,7 +2438,7 @@ app.delete("/api/admin/notes/:id", requireAdmin, (req, res) => {
     }
   }
 
-  // Clean up cover image
+  // Clean up cover image and strictly AWAIT deletion
   if (deletedNote.cover_image && deletedNote.cover_image.startsWith("/api/covers/")) {
     const coverFilename = deletedNote.cover_image.replace("/api/covers/", "");
     const coverPath = path.join(COVERS_DIR, coverFilename);
@@ -2398,10 +2447,10 @@ app.delete("/api/admin/notes/:id", requireAdmin, (req, res) => {
         fs.unlinkSync(coverPath);
       } catch (e) {}
     }
-    deleteImageFromFirestore(coverFilename).catch(() => {});
+    await deleteImageFromFirestore(coverFilename);
   }
 
-  // Clean up preview images
+  // Clean up preview images and strictly AWAIT deletion
   if (Array.isArray(deletedNote.preview_images)) {
     for (const previewUrl of deletedNote.preview_images) {
       if (previewUrl && previewUrl.startsWith("/api/covers/")) {
@@ -2412,10 +2461,15 @@ app.delete("/api/admin/notes/:id", requireAdmin, (req, res) => {
             fs.unlinkSync(previewPath);
           } catch (e) {}
         }
-        deleteImageFromFirestore(previewFilename).catch(() => {});
+        await deleteImageFromFirestore(previewFilename);
       }
     }
   }
+
+  // Mirror deletion to Supabase if configured
+  deleteProduct(id).catch((err) => {
+    console.log("[SUPABASE PRODUCT DELETE] Fallback:", err?.message || err);
+  });
 
   res.json({ success: true, message: "Note deleted successfully." });
 });
@@ -2476,6 +2530,13 @@ app.post("/api/admin/orders/:id/approve", requireAdmin, async (req, res) => {
 
   orders[orderIndex] = order;
   writeJSON(ORDERS_FILE, orders);
+
+  // Sync to Firestore Cloud
+  try {
+    await saveOrderToFirestore(order);
+  } catch (fErr: any) {
+    console.error("[FIRESTORE ORDER APPROVAL ERROR]:", fErr?.message || fErr);
+  }
 
   // Sync to Supabase & create download_access table record if available
   try {
@@ -2573,6 +2634,13 @@ app.post("/api/admin/orders/:id/reject", requireAdmin, async (req, res) => {
 
   orders[orderIndex] = order;
   writeJSON(ORDERS_FILE, orders);
+
+  // Sync to Firestore Cloud
+  try {
+    await saveOrderToFirestore(order);
+  } catch (fErr: any) {
+    console.error("[FIRESTORE ORDER REJECTION ERROR]:", fErr?.message || fErr);
+  }
 
   try {
     await rejectPaymentSecure(order.id, order.rejection_reason);

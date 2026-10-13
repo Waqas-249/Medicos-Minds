@@ -41,19 +41,18 @@ export function isFirebaseConfigured(): boolean {
 }
 
 /**
- * Fetch all notes stored in Firestore
+ * Fetch all notes stored in Firestore (both published and drafts)
  */
 export async function fetchAllNotesFromFirestore(): Promise<any[]> {
   if (!db) return [];
   try {
     const colRef = collection(db, "notes");
-    const q = query(colRef, where("published", "==", true));
-    const snapshot = await getDocs(q);
+    const snapshot = await getDocs(colRef);
     const notes: any[] = [];
     snapshot.forEach((d) => {
       notes.push(d.data());
     });
-    console.log(`[FIREBASE] Retrieved ${notes.length} published notes from Firestore cloud storage.`);
+    console.log(`[FIREBASE] Retrieved ${notes.length} total notes from Firestore cloud storage.`);
     return notes;
   } catch (err: any) {
     console.warn("[FIREBASE] Notice fetching notes from Firestore:", err?.message || err);
@@ -323,4 +322,24 @@ export async function deleteImageFromFirestore(filename: string): Promise<void> 
   } catch (err: any) {
     console.warn(`[FIREBASE IMAGE PERSISTENCE] Notice deleting image ${filename}:`, err?.message || err);
   }
+}
+
+/**
+ * Remove all images from Firestore note_images collection
+ */
+export async function clearAllImagesFromFirestore(): Promise<number> {
+  if (!db) return 0;
+  let deletedCount = 0;
+  try {
+    const colRef = collection(db, "note_images");
+    const snap = await getDocs(colRef);
+    for (const d of snap.docs) {
+      await deleteDoc(d.ref);
+      deletedCount++;
+    }
+    console.log(`[FIREBASE IMAGE PERSISTENCE] Cleared all ${deletedCount} images from Firestore.`);
+  } catch (err: any) {
+    console.warn("[FIREBASE IMAGE PERSISTENCE] Notice clearing images:", err?.message || err);
+  }
+  return deletedCount;
 }
