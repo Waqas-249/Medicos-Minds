@@ -103,22 +103,16 @@ export const NoteDetailsModal: React.FC<NoteDetailsModalProps> = ({
               <div 
                 onTouchStart={handleTouchStart}
                 onTouchEnd={handleTouchEnd}
-                className="relative rounded-2xl overflow-hidden min-h-[260px] sm:min-h-[320px] max-h-[420px] h-[40vh] w-full bg-stone-950 border border-stone-200 shadow-xs flex items-center justify-center group select-none"
+                className="relative rounded-2xl overflow-hidden min-h-[260px] sm:min-h-[320px] max-h-[420px] h-[40vh] w-full bg-stone-950 border border-stone-200 shadow-xs flex items-center justify-center group select-none cursor-zoom-in"
+                onClick={() => setIsFullscreen(true)}
               >
-                {/* Ambient background blur for aesthetic depth */}
-                <img
-                  src={images[activeSlide]}
-                  alt=""
-                  aria-hidden="true"
-                  referrerPolicy="no-referrer"
-                  className="absolute inset-0 w-full h-full object-cover blur-xl opacity-20 scale-110 pointer-events-none"
-                />
-                {/* 100% full view image, completely uncropped */}
+                {/* 100% full view image, completely uncropped, GPU-optimized */}
                 <img
                   src={images[activeSlide]}
                   alt={`${note.title} - ${getSlideLabel(activeSlide)}`}
+                  decoding="async"
                   referrerPolicy="no-referrer"
-                  className="relative z-1 max-h-full max-w-full object-contain p-2"
+                  className="relative z-1 max-h-full max-w-full object-contain p-2 hover:scale-[1.02] transition-transform duration-200"
                 />
 
                 {/* Left / Right Carousel Controls */}
@@ -126,17 +120,23 @@ export const NoteDetailsModal: React.FC<NoteDetailsModalProps> = ({
                   <>
                     <button
                       type="button"
-                      onClick={handlePrev}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handlePrev();
+                      }}
                       aria-label="Previous Slide"
-                      className="absolute left-2.5 top-1/2 -translate-y-1/2 w-8 h-8 sm:w-9 sm:h-9 rounded-full bg-black/60 hover:bg-black/85 text-white flex items-center justify-center backdrop-blur-xs transition-all shadow-md active:scale-95 z-10"
+                      className="absolute left-2.5 top-1/2 -translate-y-1/2 w-8 h-8 sm:w-9 sm:h-9 rounded-full bg-black/60 hover:bg-black/85 text-white flex items-center justify-center backdrop-blur-xs transition-all shadow-md active:scale-95 z-10 cursor-pointer"
                     >
                       <ChevronLeft className="w-5 h-5" />
                     </button>
                     <button
                       type="button"
-                      onClick={handleNext}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleNext();
+                      }}
                       aria-label="Next Slide"
-                      className="absolute right-2.5 top-1/2 -translate-y-1/2 w-8 h-8 sm:w-9 sm:h-9 rounded-full bg-black/60 hover:bg-black/85 text-white flex items-center justify-center backdrop-blur-xs transition-all shadow-md active:scale-95 z-10"
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 w-8 h-8 sm:w-9 sm:h-9 rounded-full bg-black/60 hover:bg-black/85 text-white flex items-center justify-center backdrop-blur-xs transition-all shadow-md active:scale-95 z-10 cursor-pointer"
                     >
                       <ChevronRight className="w-5 h-5" />
                     </button>
@@ -144,7 +144,7 @@ export const NoteDetailsModal: React.FC<NoteDetailsModalProps> = ({
                 )}
 
                 {/* Top Badge: Slide index & label */}
-                <div className="absolute top-3 left-3 z-10 flex items-center gap-1.5">
+                <div className="absolute top-3 left-3 z-10 flex items-center gap-1.5 pointer-events-none">
                   <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold bg-black/75 text-white shadow-xs backdrop-blur-xs border border-white/20">
                     <Eye className="w-3.5 h-3.5 text-emerald-400" />
                     <span>{activeSlide + 1}/{images.length} • {getSlideLabel(activeSlide)}</span>
@@ -154,11 +154,14 @@ export const NoteDetailsModal: React.FC<NoteDetailsModalProps> = ({
                 {/* Zoom Fullscreen trigger */}
                 <button
                   type="button"
-                  onClick={() => setIsFullscreen(true)}
-                  className="absolute bottom-3 right-3 z-10 inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-black/70 hover:bg-black/90 text-white backdrop-blur-xs transition-colors border border-white/20 shadow-xs"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setIsFullscreen(true);
+                  }}
+                  className="absolute bottom-3 right-3 z-10 inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-black/70 hover:bg-black/90 text-white backdrop-blur-xs transition-colors border border-white/20 shadow-xs cursor-pointer"
                 >
                   <Maximize2 className="w-3 h-3" />
-                  <span>Full View</span>
+                  <span>Tap to Zoom</span>
                 </button>
               </div>
 

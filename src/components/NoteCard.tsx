@@ -18,6 +18,10 @@ export const NoteCard: React.FC<NoteCardProps> = ({ note, onSelect, onBuyNow }) 
   const [touchStartX, setTouchStartX] = useState<number | null>(null);
   const [imgErrors, setImgErrors] = useState<{ [key: number]: boolean }>({});
 
+  React.useEffect(() => {
+    setImgErrors({});
+  }, [note.id]);
+
   const formattedSize = note.pdf_size
     ? note.pdf_size >= 1024 * 1024 * 1024
       ? (note.pdf_size / (1024 * 1024 * 1024)).toFixed(2) + ' GB'
@@ -54,32 +58,23 @@ export const NoteCard: React.FC<NoteCardProps> = ({ note, onSelect, onBuyNow }) 
       id={`note-card-${note.id}`}
       className="bg-white rounded-2xl border border-stone-200 shadow-sm hover:shadow-md transition-all duration-200 overflow-hidden flex flex-col group"
     >
-      {/* Image Slider Container - No cropping or cutting, 100% full view */}
+      {/* Image Slider Container - 100% full view, GPU-optimized */}
       <div 
         onClick={() => onSelect(note)}
         onTouchStart={handleTouchStart}
         onTouchEnd={handleTouchEnd}
-        className="relative h-64 sm:h-72 w-full bg-stone-950 cursor-pointer overflow-hidden border-b border-stone-100 flex items-center justify-center select-none group/slider"
+        className="relative h-64 sm:h-72 w-full bg-stone-950 bg-gradient-to-b from-stone-900 to-stone-950 cursor-pointer overflow-hidden border-b border-stone-100 flex items-center justify-center select-none group/slider"
       >
         {images.length > 0 && !imgErrors[currentIndex] ? (
-          <>
-            {/* Ambient background blur */}
-            <img
-              src={images[currentIndex]}
-              alt=""
-              aria-hidden="true"
-              referrerPolicy="no-referrer"
-              className="absolute inset-0 w-full h-full object-cover blur-xl opacity-25 scale-110 pointer-events-none"
-            />
-            {/* Main image: fully contained, zero cropping from any side */}
-            <img
-              src={images[currentIndex]}
-              alt={`${note.title} - Preview ${currentIndex + 1}`}
-              referrerPolicy="no-referrer"
-              onError={() => setImgErrors((prev) => ({ ...prev, [currentIndex]: true }))}
-              className="relative z-1 max-h-full max-w-full object-contain p-2 group-hover:scale-[1.02] transition-transform duration-300"
-            />
-          </>
+          <img
+            src={images[currentIndex]}
+            alt={`${note.title} - Preview ${currentIndex + 1}`}
+            loading="lazy"
+            decoding="async"
+            referrerPolicy="no-referrer"
+            onError={() => setImgErrors((prev) => ({ ...prev, [currentIndex]: true }))}
+            className="relative z-1 max-h-full max-w-full object-contain p-2 group-hover:scale-[1.02] transition-transform duration-200"
+          />
         ) : (
           <div className="flex flex-col items-center justify-center p-6 text-stone-300 bg-stone-900 w-full h-full">
             <div className="w-12 h-12 rounded-xl bg-white/10 text-white flex items-center justify-center mb-2 shadow-xs">

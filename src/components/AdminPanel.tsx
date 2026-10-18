@@ -50,14 +50,16 @@ type TabType = 'upload' | 'manage' | 'orders' | 'settings' | 'guide';
 // Automatically optimize and compress images on the client before uploading
 // Ensures images fit within cloud storage limits, upload in milliseconds, and retain crystal clear quality
 async function compressImageForUpload(file: File): Promise<File> {
-  if (!file.type.startsWith('image/')) return file;
+  const isImage = file.type.startsWith('image/') || /\.(jpe?g|png|webp|bmp|gif|heic)$/i.test(file.name);
+  if (!isImage) return file;
+
   return new Promise((resolve) => {
     const reader = new FileReader();
     reader.onload = (e) => {
       const img = new Image();
       img.onload = () => {
-        const MAX_WIDTH = 1200;
-        const MAX_HEIGHT = 1600;
+        const MAX_WIDTH = 1000;
+        const MAX_HEIGHT = 1400;
         let width = img.width;
         let height = img.height;
 
@@ -73,14 +75,16 @@ async function compressImageForUpload(file: File): Promise<File> {
         const ctx = canvas.getContext('2d');
         if (!ctx) return resolve(file);
 
+        ctx.fillStyle = '#FFFFFF';
+        ctx.fillRect(0, 0, width, height);
         ctx.drawImage(img, 0, 0, width, height);
+
         canvas.toBlob(
           (blob) => {
-            if (blob && (blob.size < file.size || width !== img.width)) {
-              const ext = file.name.endsWith('.png') ? '.png' : '.jpeg';
-              const cleanName = file.name.replace(/\.[^/.]+$/, '') + ext;
+            if (blob) {
+              const cleanName = file.name.replace(/\.[^/.]+$/, '') + '.jpeg';
               const compressedFile = new File([blob], cleanName, {
-                type: blob.type || (ext === '.png' ? 'image/png' : 'image/jpeg'),
+                type: 'image/jpeg',
                 lastModified: Date.now(),
               });
               resolve(compressedFile);
@@ -88,8 +92,8 @@ async function compressImageForUpload(file: File): Promise<File> {
               resolve(file);
             }
           },
-          file.type === 'image/png' ? 'image/png' : 'image/jpeg',
-          0.85
+          'image/jpeg',
+          0.82
         );
       };
       img.onerror = () => resolve(file);
@@ -113,8 +117,17 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
 }) => {
   // Login Form State
   const [pinInput, setPinInput] = useState('');
+  const [showLoginPassword, setShowLoginPassword] = useState(false);
   const [loginError, setLoginError] = useState<string | null>(null);
   const [loginLoading, setLoginLoading] = useState(false);
+
+  // Clear login inputs every time modal opens
+  useEffect(() => {
+    if (isOpen && !isAdmin) {
+      setPinInput('');
+      setLoginError(null);
+    }
+  }, [isOpen, isAdmin]);
 
   // Tab State
   const [activeTab, setActiveTab] = useState<TabType>('upload');
@@ -226,30 +239,38 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     if (profile.admin_pin) setSettingsAdminPin(profile.admin_pin);
   }, [profile]);
 
-  // Fetch admin data when logged in
-  const fetchAdminData = async () => {
+  // Fetch admin data when logged in with resilient safeFetch
+  const fetchAdminData = async (isBackground = false) => {
     if (!adminToken) return;
-    setLoadingData(true);
+    if (!isBackground) {
+      setLoadingData(true);
+    }
     try {
+      const safeFetch = async (url: string) => {
+        try {
+          return await fetch(url, {
+            headers: { Authorization: `Bearer ${adminToken}` },
+          });
+        } catch {
+          return null;
+        }
+      };
+
+      const fetchCloudStatus = activeTab === 'settings' || (!supabaseStatus && !firebaseStatus);
       const [notesRes, ordersRes, settingsRes, supabaseRes, firebaseRes] = await Promise.all([
-        fetch('/api/admin/notes', {
-          headers: { Authorization: `Bearer ${adminToken}` },
-        }),
-        fetch('/api/admin/orders', {
-          headers: { Authorization: `Bearer ${adminToken}` },
-        }),
-        fetch('/api/admin/settings', {
-          headers: { Authorization: `Bearer ${adminToken}` },
-        }),
-        fetch('/api/admin/supabase-status', {
-          headers: { Authorization: `Bearer ${adminToken}` },
-        }).catch(() => null),
-        fetch('/api/admin/firebase-status', {
-          headers: { Authorization: `Bearer ${adminToken}` },
-        }).catch(() => null),
+        safeFetch('/api/admin/notes'),
+        safeFetch('/api/admin/orders'),
+        safeFetch('/api/admin/settings'),
+        fetchCloudStatus ? safeFetch('/api/admin/supabase-status') : Promise.resolve(null),
+        fetchCloudStatus ? safeFetch('/api/admin/firebase-status') : Promise.resolve(null),
       ]);
 
-      if (notesRes.ok) {
+      if (notesRes && notesRes.status === 401) {
+        onLogout();
+        return;
+      }
+
+      if (notesRes && notesRes.ok) {
         const notesData = await notesRes.json();
         const uniqueNotes = Array.isArray(notesData)
           ? Array.from(new Map(notesData.map((item: Note) => [item.id, item])).values())
@@ -271,14 +292,16 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
           }
         } catch (e) {}
       }
-      if (ordersRes.ok) {
+
+      if (ordersRes && ordersRes.ok) {
         const ordersData = await ordersRes.json();
         const uniqueOrders = Array.isArray(ordersData)
           ? Array.from(new Map(ordersData.map((item: any) => [item.id, item])).values())
           : [];
         setAdminOrders(uniqueOrders);
       }
-      if (settingsRes.ok) {
+
+      if (settingsRes && settingsRes.ok) {
         const settingsData = await settingsRes.json();
         if (settingsData.name) setSettingsName(settingsData.name);
         if (settingsData.bio !== undefined) setSettingsBio(settingsData.bio);
@@ -291,16 +314,18 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
         if (settingsData.support_email) setSettingsEmail(settingsData.support_email);
         if (settingsData.admin_pin) setSettingsAdminPin(settingsData.admin_pin);
       }
+
       if (supabaseRes && supabaseRes.ok) {
         const sbData = await supabaseRes.json();
         setSupabaseStatus(sbData);
       }
+
       if (firebaseRes && firebaseRes.ok) {
         const fbData = await firebaseRes.json();
         setFirebaseStatus(fbData);
       }
     } catch (err) {
-      console.error('Error fetching admin data:', err);
+      console.warn('Notice: temporary issue fetching admin data:', err);
     } finally {
       setLoadingData(false);
     }
@@ -308,7 +333,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
 
   useEffect(() => {
     if (isAdmin && adminToken) {
-      fetchAdminData();
+      fetchAdminData(adminNotes.length > 0);
     }
   }, [isAdmin, adminToken, activeTab]);
 
@@ -528,8 +553,12 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
           startChunkedUpload(selectedPdf);
         }
         if (uploaderRef.current) {
-          finalResult = await uploaderRef.current.start();
-          setUploadedPdfResult(finalResult);
+          try {
+            finalResult = await uploaderRef.current.start();
+            setUploadedPdfResult(finalResult);
+          } catch (uploadErr: any) {
+            console.warn('Chunk upload did not finish or was aborted:', uploadErr?.message);
+          }
         }
       }
 
@@ -546,7 +575,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
         formData.append('uploaded_pdf_size', String(finalResult.pdf_size));
       } else if (selectedPdf) {
         if (selectedPdf.size > 25 * 1024 * 1024) {
-          throw new Error('PDF file upload is still processing. Please wait for the progress bar to complete (100%), or paste your Google Drive link for instant publishing.');
+          throw new Error('PDF file upload is still processing. Please wait for the upload progress bar to reach 100%, or paste your Google Drive link.');
         }
         formData.append('pdf', selectedPdf);
       }
@@ -592,17 +621,23 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
         type: 'success',
         text: editingNote
           ? 'Note updated successfully!'
-          : 'Note published! It is now live on your store.',
+          : 'Note published! It is now permanently saved and live on your store.',
       });
 
       resetForm();
-      fetchAdminData();
+      fetchAdminData(true);
       onNotesUpdated();
       if (!editingNote) {
         setActiveTab('manage');
       }
     } catch (err: any) {
-      setFormMessage({ type: 'error', text: err.message || 'Error uploading note.' });
+      const errorMsg = err.message || 'Error uploading note.';
+      setFormMessage({
+        type: 'error',
+        text: errorMsg.includes('Failed to fetch')
+          ? 'Connection notice: Could not complete note upload. Please verify your connection and try again.'
+          : errorMsg,
+      });
     } finally {
       setFormSubmitting(false);
     }
@@ -1025,48 +1060,63 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
           </div>
         </div>
 
-        {/* IF NOT LOGGED IN: SHOW LOGIN SCREEN */}
+        {/* IF NOT LOGGED IN: SHOW SECURE ADMIN PASSWORD SCREEN */}
         {!isAdmin ? (
           <div className="p-6 sm:p-10 flex flex-col items-center justify-center text-center">
-            <div className="w-14 h-14 rounded-2xl bg-[#D9E4DD] text-[#5C715E] flex items-center justify-center mb-3 shadow-xs">
-              <Shield className="w-7 h-7" />
+            <div className="w-16 h-16 rounded-2xl bg-[#5C715E] text-white flex items-center justify-center mb-4 shadow-md shadow-[#5C715E]/20">
+              <Lock className="w-8 h-8" />
             </div>
-            <h4 className="text-xl font-black text-[#2D3436]">Creator Authentication</h4>
-            <p className="text-xs sm:text-sm text-stone-600 max-w-xs mt-1">
-              Enter your Creator PIN to access your note uploads, pricing controls, and sales records.
+            <h4 className="text-xl sm:text-2xl font-black text-[#2D3436]">Admin Access Required</h4>
+            <p className="text-xs sm:text-sm text-stone-600 max-w-sm mt-1.5 leading-relaxed">
+              This panel is restricted exclusively to the store administrator. Please enter your admin password to continue.
             </p>
 
             <form onSubmit={handleLogin} className="w-full max-w-xs mt-6 space-y-4">
               {loginError && (
-                <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-red-700 text-xs flex items-center gap-2">
-                  <AlertCircle className="w-4 h-4 shrink-0" />
-                  <span>{loginError}</span>
+                <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-red-700 text-xs flex items-center gap-2 text-left">
+                  <AlertCircle className="w-4 h-4 shrink-0 text-red-500" />
+                  <span className="font-semibold">{loginError}</span>
                 </div>
               )}
 
-              <div>
+              <div className="relative">
                 <input
                   id="admin-pin-input"
-                  type="password"
+                  type={showLoginPassword ? 'text' : 'password'}
                   required
-                  placeholder="Enter PIN (Default: 1234)"
+                  autoFocus
+                  placeholder="Enter Admin Password"
                   value={pinInput}
                   onChange={(e) => setPinInput(e.target.value)}
-                  className="w-full text-center px-4 py-3 rounded-xl border border-stone-300 text-base font-bold tracking-widest focus:outline-none focus:ring-2 focus:ring-[#5C715E] focus:border-transparent bg-stone-50"
+                  className="w-full pl-4 pr-11 py-3.5 rounded-xl border border-stone-300 text-center text-base font-bold tracking-wider focus:outline-none focus:ring-2 focus:ring-[#5C715E] focus:border-transparent bg-stone-50"
                 />
-                <span className="text-[11px] text-stone-400 mt-1.5 block">
-                  Default PIN is <strong className="text-[#2D3436]">1234</strong> (can be changed in Store Settings).
-                </span>
+                <button
+                  type="button"
+                  onClick={() => setShowLoginPassword(!showLoginPassword)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-stone-400 hover:text-stone-700 p-1.5 rounded-lg transition-colors cursor-pointer"
+                  title={showLoginPassword ? 'Hide password' : 'Show password'}
+                >
+                  {showLoginPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
               </div>
 
-              <button
-                id="admin-login-submit-btn"
-                type="submit"
-                disabled={loginLoading}
-                className="w-full py-3 bg-[#5C715E] hover:bg-[#4A5D4E] text-white rounded-xl font-bold text-sm shadow-md shadow-[#5C715E]/20 transition-colors disabled:opacity-50"
-              >
-                {loginLoading ? 'Authenticating...' : 'Unlock Admin Panel'}
-              </button>
+              <div className="flex gap-2.5 pt-1">
+                <button
+                  type="button"
+                  onClick={onClose}
+                  className="w-1/2 py-3 bg-stone-100 hover:bg-stone-200 text-stone-700 rounded-xl font-bold text-sm transition-colors cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  id="admin-login-submit-btn"
+                  type="submit"
+                  disabled={loginLoading}
+                  className="w-1/2 py-3 bg-[#5C715E] hover:bg-[#4A5D4E] text-white rounded-xl font-bold text-sm shadow-md shadow-[#5C715E]/20 transition-all disabled:opacity-50 cursor-pointer"
+                >
+                  {loginLoading ? 'Checking...' : 'Unlock Panel'}
+                </button>
+              </div>
             </form>
           </div>
         ) : (

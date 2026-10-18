@@ -48,33 +48,69 @@ for (const dir of [DATA_DIR, UPLOADS_DIR, COVERS_DIR, PRIVATE_PDFS_DIR, SCREENSH
 // Data file paths
 const NOTES_FILE = path.join(DATA_DIR, "notes.json");
 const NOTES_BACKUP_FILE = path.join(DATA_DIR, "notes_backup.json");
+const DEFAULT_NOTES_FILE = path.join(process.cwd(), "server", "default_notes.json");
 const ORDERS_FILE = path.join(DATA_DIR, "orders.json");
 const SETTINGS_FILE = path.join(DATA_DIR, "settings.json");
 const TRANSACTION_LOGS_FILE = path.join(DATA_DIR, "transaction_logs.json");
 
-// Ensure data files exist with default empty states (ZERO preloaded products)
-if (!fs.existsSync(NOTES_FILE)) {
-  if (fs.existsSync(NOTES_BACKUP_FILE)) {
-    try {
-      const backupData = fs.readFileSync(NOTES_BACKUP_FILE, "utf-8");
-      fs.writeFileSync(NOTES_FILE, backupData);
-    } catch (e) {
-      fs.writeFileSync(NOTES_FILE, JSON.stringify([], null, 2));
-    }
-  } else {
-    fs.writeFileSync(NOTES_FILE, JSON.stringify([], null, 2));
-  }
-} else if (fs.existsSync(NOTES_BACKUP_FILE)) {
-  // If notes_backup has more notes than notes.json (e.g. after container refresh), recover automatically
+// Helper to atomically persist notes across all 3 storage levels
+function persistNotes(notes: any[]) {
+  writeJSON(NOTES_FILE, notes);
+  writeJSON(NOTES_BACKUP_FILE, notes);
   try {
-    const cur = JSON.parse(fs.readFileSync(NOTES_FILE, "utf-8"));
-    const bkp = JSON.parse(fs.readFileSync(NOTES_BACKUP_FILE, "utf-8"));
-    if (Array.isArray(bkp) && Array.isArray(cur) && bkp.length > cur.length) {
-      fs.writeFileSync(NOTES_FILE, JSON.stringify(bkp, null, 2));
-      console.log(`[DATA RECOVERY] Automatically restored ${bkp.length} notes from notes_backup.json`);
-    }
+    writeJSON(DEFAULT_NOTES_FILE, notes);
   } catch (e) {}
 }
+
+// Ensure data files exist with automatic recovery across all 3 layers (Disk, Backup, Codebase)
+(() => {
+  let notes: any[] = [];
+  if (fs.existsSync(NOTES_FILE)) {
+    try {
+      notes = JSON.parse(fs.readFileSync(NOTES_FILE, "utf-8"));
+    } catch (e) {}
+  }
+
+  // Check backup file
+  if ((!Array.isArray(notes) || notes.length === 0) && fs.existsSync(NOTES_BACKUP_FILE)) {
+    try {
+      const bkp = JSON.parse(fs.readFileSync(NOTES_BACKUP_FILE, "utf-8"));
+      if (Array.isArray(bkp) && bkp.length > 0) {
+        notes = bkp;
+        console.log(`[DATA RECOVERY] Restored ${notes.length} notes from notes_backup.json`);
+      }
+    } catch (e) {}
+  }
+
+  // Check default permanent notes file
+  if ((!Array.isArray(notes) || notes.length === 0) && fs.existsSync(DEFAULT_NOTES_FILE)) {
+    try {
+      const def = JSON.parse(fs.readFileSync(DEFAULT_NOTES_FILE, "utf-8"));
+      if (Array.isArray(def) && def.length > 0) {
+        notes = def;
+        console.log(`[DATA RECOVERY] Restored ${notes.length} notes from default_notes.json`);
+      }
+    } catch (e) {}
+  }
+
+  // If notes exist in default_notes that are missing in notes.json, union-merge to protect all uploaded notes
+  if (fs.existsSync(DEFAULT_NOTES_FILE)) {
+    try {
+      const def = JSON.parse(fs.readFileSync(DEFAULT_NOTES_FILE, "utf-8"));
+      if (Array.isArray(def) && Array.isArray(notes)) {
+        const idMap = new Map(notes.map((n: any) => [String(n.id), n]));
+        for (const dn of def) {
+          if (dn && dn.id && !idMap.has(String(dn.id))) {
+            idMap.set(String(dn.id), dn);
+          }
+        }
+        notes = Array.from(idMap.values());
+      }
+    } catch (e) {}
+  }
+
+  persistNotes(Array.isArray(notes) ? notes : []);
+})();
 
 if (!fs.existsSync(ORDERS_FILE)) {
   fs.writeFileSync(ORDERS_FILE, JSON.stringify([], null, 2));
@@ -109,7 +145,7 @@ if (isFirebaseConfigured()) {
         if (n && n.id) noteMap.set(String(n.id), n);
       }
 
-      // Union with Firestore cloud notes (prefer newer updated_at if both exist)
+      // Union with Firestore cloud notes (cloud note is authoritative for images, previews, and links)
       if (Array.isArray(fbNotes)) {
         for (const n of fbNotes) {
           if (n && n.id) {
@@ -117,17 +153,32 @@ if (isFirebaseConfigured()) {
             if (!existing) {
               noteMap.set(String(n.id), n);
             } else {
+              // Always preserve images and drive links if present in Firestore
+              const cover_image = n.cover_image || existing.cover_image || "";
+              const preview_images = (Array.isArray(n.preview_images) && n.preview_images.length > 0)
+                ? n.preview_images
+                : (existing.preview_images || []);
+              const drive_url = n.drive_url || existing.drive_url || "";
+              const pdf_file = n.pdf_file || existing.pdf_file || "";
+
               const curTime = new Date(existing.updated_at || existing.created_at || 0).getTime();
               const fbTime = new Date(n.updated_at || n.created_at || 0).getTime();
-              noteMap.set(String(n.id), fbTime >= curTime ? n : existing);
+              const base = fbTime >= curTime ? n : existing;
+
+              noteMap.set(String(n.id), {
+                ...base,
+                cover_image,
+                preview_images,
+                drive_url,
+                pdf_file: pdf_file || base.pdf_file,
+              });
             }
           }
         }
       }
 
       const mergedNotes = Array.from(noteMap.values());
-      writeJSON(NOTES_FILE, mergedNotes);
-      writeJSON(NOTES_BACKUP_FILE, mergedNotes);
+      persistNotes(mergedNotes);
       console.log(`[FIREBASE AUTO-SYNC] Synchronized ${mergedNotes.length} notes (Disk: ${curNotes.length}, Cloud: ${fbNotes?.length || 0}).`);
 
       // Seed any notes from disk that might be missing in Firestore cloud
@@ -341,7 +392,36 @@ app.get("/api/covers/:filename", async (req, res) => {
     return res.send(buffer);
   }
 
-  res.status(404).json({ error: "Image not found" });
+  // Graceful visual fallback for notes with pending image sync (never shows broken image icon)
+  const fallbackSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="600" height="800" viewBox="0 0 600 800">
+    <defs>
+      <linearGradient id="medGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+        <stop offset="0%" stop-color="#1c1917"/>
+        <stop offset="50%" stop-color="#292524"/>
+        <stop offset="100%" stop-color="#0c0a09"/>
+      </linearGradient>
+      <linearGradient id="brandGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+        <stop offset="0%" stop-color="#5C715E"/>
+        <stop offset="100%" stop-color="#8ba888"/>
+      </linearGradient>
+    </defs>
+    <rect width="600" height="800" fill="url(#medGrad)"/>
+    <rect x="25" y="25" width="550" height="750" rx="16" fill="none" stroke="#44403c" stroke-width="2"/>
+    <g transform="translate(300, 360)">
+      <circle cx="0" cy="0" r="50" fill="#5C715E" fill-opacity="0.25"/>
+      <path d="M-22 -18 L22 -18 L22 26 L-22 26 Z" fill="none" stroke="#8ba888" stroke-width="3" rx="2"/>
+      <path d="M-12 -6 L12 -6 M-12 6 L12 6 M-12 16 L6 16" stroke="#f5f5f4" stroke-width="2.5" stroke-linecap="round"/>
+      <circle cx="0" cy="-32" r="5" fill="#5C715E"/>
+    </g>
+    <text x="300" y="460" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="24" font-weight="800" fill="#f5f5f4" text-anchor="middle" letter-spacing="1">MEDICOS⛑️MINDS</text>
+    <text x="300" y="495" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="14" font-weight="600" fill="#a8a29e" text-anchor="middle">BPT HIGH-YIELD STUDY GUIDE</text>
+    <rect x="220" y="525" width="160" height="30" rx="15" fill="url(#brandGrad)"/>
+    <text x="300" y="545" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11" font-weight="700" fill="#ffffff" text-anchor="middle" letter-spacing="0.5">DIGITAL NOTES</text>
+  </svg>`;
+
+  res.setHeader("Content-Type", "image/svg+xml");
+  res.setHeader("Cache-Control", "public, max-age=3600");
+  return res.send(fallbackSvg);
 });
 
 // Serve payment verification screenshots
@@ -355,15 +435,55 @@ app.get("/api/screenshots/:filename", (req, res) => {
   res.status(404).json({ error: "Screenshot not found" });
 });
 
-// Simple in-memory session tokens for admin
-const adminSessions = new Set<string>();
+// Persistent Session Store & Cryptographic Authentication
+const SESSIONS_FILE = path.join(DATA_DIR, "admin_sessions.json");
+const ADMIN_SECRET = process.env.ADMIN_SECRET || "medicos_admin_secret_key_88095";
 
-// Admin Auth Middleware
+function loadAdminSessions(): Set<string> {
+  try {
+    if (fs.existsSync(SESSIONS_FILE)) {
+      const data = JSON.parse(fs.readFileSync(SESSIONS_FILE, "utf-8"));
+      if (Array.isArray(data)) return new Set(data);
+    }
+  } catch (e) {}
+  return new Set<string>();
+}
+
+const adminSessions = loadAdminSessions();
+
+function saveAdminSessions() {
+  try {
+    fs.writeFileSync(SESSIONS_FILE, JSON.stringify(Array.from(adminSessions)), "utf-8");
+  } catch (e) {}
+}
+
+function isValidAdminToken(token: string): boolean {
+  if (!token || typeof token !== "string") return false;
+  if (adminSessions.has(token)) return true;
+  if (token.startsWith("adm_hmac_")) {
+    const parts = token.split("_");
+    if (parts.length === 4) {
+      const expiry = parseInt(parts[2], 10);
+      const signature = parts[3];
+      if (!isNaN(expiry) && expiry > Date.now()) {
+        const expectedSig = crypto.createHmac("sha256", ADMIN_SECRET).update(`adm_${expiry}`).digest("hex");
+        if (signature === expectedSig) {
+          adminSessions.add(token);
+          saveAdminSessions();
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+// Admin Auth Middleware (Never loses session on server reboot/redeploy)
 function requireAdmin(req: Request, res: Response, next: NextFunction) {
   const authHeader = req.headers.authorization;
   const token = authHeader?.startsWith("Bearer ") ? authHeader.substring(7) : null;
   
-  if (!token || !adminSessions.has(token)) {
+  if (!token || !isValidAdminToken(token)) {
     return res.status(401).json({ error: "Unauthorized. Admin login required." });
   }
   next();
@@ -1314,7 +1434,7 @@ app.post("/api/checkout/check-status", async (req, res) => {
 
 // 6. Submit UPI Payment for Verification (Manual creator verification; does NOT auto-mark paid)
 app.post("/api/checkout/submit-upi-payment", upload.single("screenshot"), async (req: any, res: any) => {
-  const { order_id, transaction_ref, customer_email } = req.body || {};
+  const { order_id, transaction_ref, customer_email, customer_name, customer_phone } = req.body || {};
 
   if (!order_id) {
     return res.status(400).json({ error: "Missing order_id" });
@@ -1421,8 +1541,14 @@ app.post("/api/checkout/submit-upi-payment", upload.single("screenshot"), async 
   if (screenshotUrl) {
     order.screenshot_url = screenshotUrl;
   }
+  if (customer_name && typeof customer_name === "string" && customer_name.trim().length >= 2) {
+    order.customer_name = customer_name.trim();
+  }
   if (customer_email && isValidEmail(customer_email)) {
     order.customer_email = customer_email.trim().toLowerCase();
+  }
+  if (customer_phone && typeof customer_phone === "string") {
+    order.customer_phone = customer_phone.trim();
   }
   order.payment_submitted_at = submissionTime;
   order.submitted_at = submissionTime;
@@ -1728,8 +1854,12 @@ app.post("/api/admin/login", (req, res) => {
     return res.status(401).json({ error: "Invalid Admin PIN / Password. Please check and try again." });
   }
 
-  const sessionToken = "adm_" + crypto.randomBytes(24).toString("hex");
+  // Generate cryptographic token that remains valid across restarts and redeploys (30 days)
+  const expiry = Date.now() + 30 * 24 * 60 * 60 * 1000;
+  const signature = crypto.createHmac("sha256", ADMIN_SECRET).update(`adm_${expiry}`).digest("hex");
+  const sessionToken = `adm_hmac_${expiry}_${signature}`;
   adminSessions.add(sessionToken);
+  saveAdminSessions();
 
   res.json({
     success: true,
@@ -1749,6 +1879,7 @@ app.post("/api/admin/logout", (req, res) => {
   const token = authHeader?.startsWith("Bearer ") ? authHeader.substring(7) : null;
   if (token) {
     adminSessions.delete(token);
+    saveAdminSessions();
   }
   res.json({ success: true });
 });
@@ -2046,8 +2177,7 @@ app.post("/api/admin/restore-notes", requireAdmin, async (req, res) => {
       }
     }
 
-    writeJSON(NOTES_FILE, currentNotes);
-    writeJSON(NOTES_BACKUP_FILE, currentNotes);
+    persistNotes(currentNotes);
     try {
       await syncAllNotesToFirestore(currentNotes);
     } catch (sErr: any) {
@@ -2145,47 +2275,49 @@ app.post(
 
       const notes = readJSON<any[]>(NOTES_FILE, []);
       notes.push(newNote);
-      writeJSON(NOTES_FILE, notes);
+      persistNotes(notes);
 
-      // Persist note to Firestore Cloud and strictly AWAIT it before finishing HTTP response
-      try {
-        await saveNoteToFirestore(newNote);
-      } catch (fErr: any) {
-        console.error("[FIRESTORE NOTE PERSISTENCE ERROR]:", fErr?.message || fErr);
-      }
-
-      // Persist uploaded cover and preview images permanently to Firestore Cloud and strictly AWAIT them
-      if (coverFile) {
-        try {
-          const buf = fs.readFileSync(coverFile.path);
-          await saveImageToFirestore(coverFile.filename, buf, coverFile.mimetype || "image/png", noteId, "cover");
-        } catch (e: any) {
-          console.error("[COVER PERSISTENCE ERROR]:", e?.message || e);
-        }
-      }
-      if (preview1File) {
-        try {
-          const buf = fs.readFileSync(preview1File.path);
-          await saveImageToFirestore(preview1File.filename, buf, preview1File.mimetype || "image/jpeg", noteId, "preview_1");
-        } catch (e: any) {
-          console.error("[PREVIEW 1 PERSISTENCE ERROR]:", e?.message || e);
-        }
-      }
-      if (preview2File) {
-        try {
-          const buf = fs.readFileSync(preview2File.path);
-          await saveImageToFirestore(preview2File.filename, buf, preview2File.mimetype || "image/jpeg", noteId, "preview_2");
-        } catch (e: any) {
-          console.error("[PREVIEW 2 PERSISTENCE ERROR]:", e?.message || e);
-        }
-      }
-
-      // Mirror to Supabase if configured (optional)
-      saveProduct(newNote, false).catch((err) => {
-        console.log("[SUPABASE PRODUCT SYNC] Note create fallback:", err?.message || err);
-      });
-
+      // Respond to admin immediately for instantaneous UI response (zero wait / zero timeout)
       res.status(201).json(newNote);
+
+      // Persist note and images permanently to Firestore Cloud in background
+      (async () => {
+        try {
+          await saveNoteToFirestore(newNote);
+        } catch (fErr: any) {
+          console.error("[FIRESTORE NOTE PERSISTENCE ERROR]:", fErr?.message || fErr);
+        }
+
+        const imageSaves: Promise<any>[] = [];
+        if (coverFile) {
+          try {
+            const buf = fs.readFileSync(coverFile.path);
+            imageSaves.push(saveImageToFirestore(coverFile.filename, buf, coverFile.mimetype || "image/png", noteId, "cover"));
+          } catch (e: any) {}
+        }
+        if (preview1File) {
+          try {
+            const buf = fs.readFileSync(preview1File.path);
+            imageSaves.push(saveImageToFirestore(preview1File.filename, buf, preview1File.mimetype || "image/jpeg", noteId, "preview_1"));
+          } catch (e: any) {}
+        }
+        if (preview2File) {
+          try {
+            const buf = fs.readFileSync(preview2File.path);
+            imageSaves.push(saveImageToFirestore(preview2File.filename, buf, preview2File.mimetype || "image/jpeg", noteId, "preview_2"));
+          } catch (e: any) {}
+        }
+        if (imageSaves.length > 0) {
+          await Promise.allSettled(imageSaves);
+        }
+
+        // Mirror to Supabase if configured (optional)
+        saveProduct(newNote, false).catch((err) => {
+          console.log("[SUPABASE PRODUCT SYNC] Note create fallback:", err?.message || err);
+        });
+      })().catch((bgErr) => {
+        console.error("[BG NOTE SYNC ERROR]:", bgErr?.message || bgErr);
+      });
     } catch (err: any) {
       console.error("Error creating note:", err);
       res.status(500).json({ error: err.message || "Failed to create note" });
@@ -2351,55 +2483,58 @@ app.put(
       };
 
       notes[index] = updatedNote;
-      writeJSON(NOTES_FILE, notes);
+      persistNotes(notes);
 
-      // Persist updated note to Firestore Cloud and strictly AWAIT it
-      try {
-        await saveNoteToFirestore(updatedNote);
-      } catch (fErr: any) {
-        console.error("[FIRESTORE NOTE UPDATE ERROR]:", fErr?.message || fErr);
-      }
-
-      // Persist any updated cover or preview images permanently to Firestore Cloud and strictly AWAIT them
-      if (coverFile) {
-        try {
-          const buf = fs.readFileSync(coverFile.path);
-          await saveImageToFirestore(coverFile.filename, buf, coverFile.mimetype || "image/png", existingNote.id, "cover");
-        } catch (e: any) {
-          console.error("[COVER UPDATE ERROR]:", e?.message || e);
-        }
-      } else if (remove_cover === "true" && existingNote.cover_image && existingNote.cover_image.startsWith("/api/covers/")) {
-        await deleteImageFromFirestore(existingNote.cover_image.replace("/api/covers/", ""));
-      }
-
-      if (preview1File) {
-        try {
-          const buf = fs.readFileSync(preview1File.path);
-          await saveImageToFirestore(preview1File.filename, buf, preview1File.mimetype || "image/jpeg", existingNote.id, "preview_1");
-        } catch (e: any) {
-          console.error("[PREVIEW 1 UPDATE ERROR]:", e?.message || e);
-        }
-      } else if (remove_preview_1 === "true" && prev1 && prev1.startsWith("/api/covers/")) {
-        await deleteImageFromFirestore(prev1.replace("/api/covers/", ""));
-      }
-
-      if (preview2File) {
-        try {
-          const buf = fs.readFileSync(preview2File.path);
-          await saveImageToFirestore(preview2File.filename, buf, preview2File.mimetype || "image/jpeg", existingNote.id, "preview_2");
-        } catch (e: any) {
-          console.error("[PREVIEW 2 UPDATE ERROR]:", e?.message || e);
-        }
-      } else if (remove_preview_2 === "true" && prev2 && prev2.startsWith("/api/covers/")) {
-        await deleteImageFromFirestore(prev2.replace("/api/covers/", ""));
-      }
-
-      // Mirror to Supabase if configured (optional)
-      saveProduct(updatedNote, true).catch((err) => {
-        console.log("[SUPABASE PRODUCT SYNC] Note update fallback:", err?.message || err);
-      });
-
+      // Respond to admin immediately for instantaneous UI response (zero wait / zero timeout)
       res.json(updatedNote);
+
+      // Persist updated note and images permanently to Firestore Cloud in background
+      (async () => {
+        try {
+          await saveNoteToFirestore(updatedNote);
+        } catch (fErr: any) {
+          console.error("[FIRESTORE NOTE UPDATE ERROR]:", fErr?.message || fErr);
+        }
+
+        const updateImageSaves: Promise<any>[] = [];
+        if (coverFile) {
+          try {
+            const buf = fs.readFileSync(coverFile.path);
+            updateImageSaves.push(saveImageToFirestore(coverFile.filename, buf, coverFile.mimetype || "image/png", existingNote.id, "cover"));
+          } catch (e: any) {}
+        } else if (remove_cover === "true" && existingNote.cover_image && existingNote.cover_image.startsWith("/api/covers/")) {
+          updateImageSaves.push(deleteImageFromFirestore(existingNote.cover_image.replace("/api/covers/", "")));
+        }
+
+        if (preview1File) {
+          try {
+            const buf = fs.readFileSync(preview1File.path);
+            updateImageSaves.push(saveImageToFirestore(preview1File.filename, buf, preview1File.mimetype || "image/jpeg", existingNote.id, "preview_1"));
+          } catch (e: any) {}
+        } else if (remove_preview_1 === "true" && prev1 && prev1.startsWith("/api/covers/")) {
+          updateImageSaves.push(deleteImageFromFirestore(prev1.replace("/api/covers/", "")));
+        }
+
+        if (preview2File) {
+          try {
+            const buf = fs.readFileSync(preview2File.path);
+            updateImageSaves.push(saveImageToFirestore(preview2File.filename, buf, preview2File.mimetype || "image/jpeg", existingNote.id, "preview_2"));
+          } catch (e: any) {}
+        } else if (remove_preview_2 === "true" && prev2 && prev2.startsWith("/api/covers/")) {
+          updateImageSaves.push(deleteImageFromFirestore(prev2.replace("/api/covers/", "")));
+        }
+
+        if (updateImageSaves.length > 0) {
+          await Promise.allSettled(updateImageSaves);
+        }
+
+        // Mirror to Supabase if configured (optional)
+        saveProduct(updatedNote, true).catch((err) => {
+          console.log("[SUPABASE PRODUCT SYNC] Note update fallback:", err?.message || err);
+        });
+      })().catch((bgErr) => {
+        console.error("[BG NOTE UPDATE SYNC ERROR]:", bgErr?.message || bgErr);
+      });
     } catch (err: any) {
       console.error("Error updating note:", err);
       res.status(500).json({ error: err.message || "Failed to update note" });
@@ -2418,7 +2553,7 @@ app.delete("/api/admin/notes/:id", requireAdmin, async (req, res) => {
   }
 
   const [deletedNote] = notes.splice(index, 1);
-  writeJSON(NOTES_FILE, notes);
+  persistNotes(notes);
   console.log(`[ADMIN] Note deleted successfully: ID ${id}, Title: ${deletedNote.title}`);
 
   // Delete from Firestore Cloud and strictly AWAIT it

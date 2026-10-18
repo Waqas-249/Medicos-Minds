@@ -55,10 +55,10 @@ export const PurchasesModal: React.FC<PurchasesModalProps> = ({
       }
 
       const uniquePurchases = Array.isArray(data.purchases)
-        ? Array.from(new Map(data.purchases.map((p: any) => [p.order_id, p])).values())
+        ? (Array.from(new Map(data.purchases.map((p: any) => [p.order_id, p])).values()) as CustomerPurchase[])
         : [];
       const uniquePending = Array.isArray(data.pending_orders)
-        ? Array.from(new Map(data.pending_orders.map((p: any) => [p.order_id, p])).values())
+        ? (Array.from(new Map(data.pending_orders.map((p: any) => [p.order_id, p])).values()) as PendingOrderItem[])
         : [];
       setPurchases(uniquePurchases);
       setPendingOrders(uniquePending);

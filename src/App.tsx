@@ -94,7 +94,7 @@ export default function App() {
         setProfile(data);
       }
     } catch (err) {
-      console.error('Error fetching settings:', err);
+      console.warn('Notice: settings fetch retryable:', err);
     }
   };
 
@@ -111,7 +111,7 @@ export default function App() {
         setNotes(uniqueNotes);
       }
     } catch (err) {
-      console.error('Error fetching notes:', err);
+      console.warn('Notice: notes fetch retryable:', err);
     } finally {
       setLoading(false);
     }

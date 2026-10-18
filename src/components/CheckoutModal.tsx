@@ -309,6 +309,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ note, onClose, ini
             customer_email: customerEmail,
             customer_phone: customerPhone,
             amount: note.price,
+            currency: 'INR',
             status: 'paid',
             download_token: data.download_token,
             download_count: 0,
@@ -606,7 +607,9 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ note, onClose, ini
       const formData = new FormData();
       formData.append('order_id', createdOrderId);
       formData.append('transaction_ref', 'QR_CODE_PAYMENT');
+      formData.append('customer_name', customerName.trim());
       formData.append('customer_email', customerEmail.trim().toLowerCase());
+      formData.append('customer_phone', customerPhone.trim());
       if (screenshotFile) {
         formData.append('screenshot', screenshotFile);
       }
@@ -632,6 +635,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ note, onClose, ini
           customer_email: customerEmail,
           customer_phone: customerPhone,
           amount: note.price,
+          currency: 'INR',
           status: 'paid',
           download_token: data.download_token,
           download_count: 0,
