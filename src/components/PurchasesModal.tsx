@@ -225,6 +225,9 @@ export const PurchasesModal: React.FC<PurchasesModalProps> = ({
                         </a>
                         <a
                           href={`/api/download/${item.download_token}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          download
                           className="flex-1 inline-flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl bg-[#5C715E] hover:bg-[#4A5D4E] text-white text-xs font-bold shadow-xs transition-colors"
                         >
                           <Download className="w-3.5 h-3.5" />

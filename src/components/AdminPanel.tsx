@@ -17,6 +17,7 @@ import {
   AlertCircle,
   CheckCircle2,
   Shield,
+  Lock,
   HelpCircle,
   ExternalLink,
   LogOut,
@@ -200,6 +201,13 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   const [isDeletingNote, setIsDeletingNote] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [manageNotification, setManageNotification] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  // Quick Google Drive Link Edit State
+  const [driveLinkModalNote, setDriveLinkModalNote] = useState<Note | null>(null);
+  const [driveLinkInput, setDriveLinkInput] = useState('');
+  const [isSavingDriveLink, setIsSavingDriveLink] = useState(false);
+  const [driveLinkError, setDriveLinkError] = useState<string | null>(null);
+  const [uploadingPdfNoteId, setUploadingPdfNoteId] = useState<string | null>(null);
 
   // Order Approval & Rejection State
   const [processingOrderId, setProcessingOrderId] = useState<string | null>(null);
@@ -681,6 +689,94 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       setDeleteError(err.message || 'Could not delete note. Please check your connection and try again.');
     } finally {
       setIsDeletingNote(false);
+    }
+  };
+
+  // Open Drive Link Modal
+  const handleOpenDriveModal = (note: Note) => {
+    setDriveLinkModalNote(note);
+    setDriveLinkInput(note.drive_url || '');
+    setDriveLinkError(null);
+  };
+
+  // Save Quick Google Drive Link
+  const handleSaveQuickDriveLink = async () => {
+    if (!adminToken || !driveLinkModalNote) return;
+    setIsSavingDriveLink(true);
+    setDriveLinkError(null);
+    try {
+      const res = await fetch(`/api/admin/notes/${driveLinkModalNote.id}/drive-url`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${adminToken}`,
+        },
+        body: JSON.stringify({ drive_url: driveLinkInput.trim() }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to update Google Drive link');
+
+      setDriveLinkModalNote(null);
+      setManageNotification({
+        type: 'success',
+        text: `Google Drive link updated for "${driveLinkModalNote.title}"! Verified buyers will now download the original full document directly.`,
+      });
+      setTimeout(() => setManageNotification(null), 5000);
+      await fetchAdminData(true);
+      onNotesUpdated();
+    } catch (err: any) {
+      setDriveLinkError(err.message || 'Error updating Google Drive link.');
+    } finally {
+      setIsSavingDriveLink(false);
+    }
+  };
+
+  // Direct 1-Click Master PDF File Upload / Replacement for an existing note
+  const handleDirectPdfUpload = async (note: Note, e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !adminToken) return;
+
+    if (!file.name.toLowerCase().endsWith('.pdf') && file.type !== 'application/pdf') {
+      setManageNotification({
+        type: 'error',
+        text: 'Please select a valid PDF file (.pdf).',
+      });
+      setTimeout(() => setManageNotification(null), 5000);
+      return;
+    }
+
+    setUploadingPdfNoteId(note.id);
+    try {
+      const formData = new FormData();
+      formData.append('pdf', file);
+
+      const res = await fetch(`/api/admin/notes/${note.id}/upload-pdf`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${adminToken}`,
+        },
+        body: formData,
+      });
+
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to upload PDF file');
+
+      setManageNotification({
+        type: 'success',
+        text: `Master PDF successfully updated for "${note.title}" (${(file.size / (1024 * 1024)).toFixed(1)} MB)! Students will now download your real full PDF.`,
+      });
+      setTimeout(() => setManageNotification(null), 6000);
+      await fetchAdminData(true);
+      onNotesUpdated();
+    } catch (err: any) {
+      setManageNotification({
+        type: 'error',
+        text: err.message || 'Could not upload PDF file. Please try again.',
+      });
+      setTimeout(() => setManageNotification(null), 5000);
+    } finally {
+      setUploadingPdfNoteId(null);
+      e.target.value = '';
     }
   };
 
@@ -1919,6 +2015,16 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                                     +{note.preview_images.length} Inside Previews
                                   </span>
                                 )}
+                                {note.drive_url ? (
+                                  <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-50 text-blue-700 border border-blue-200 flex items-center gap-1">
+                                    <ExternalLink className="w-3 h-3" />
+                                    <span>Google Drive Active</span>
+                                  </span>
+                                ) : (
+                                  <span className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-stone-100 text-stone-500 border border-stone-200">
+                                    Direct PDF Storage
+                                  </span>
+                                )}
                               </div>
                               <div className="text-xs text-stone-500 mt-0.5 flex items-center gap-2 flex-wrap">
                                 <span className="font-extrabold text-[#2D3436]">₹{note.price}</span>
@@ -1939,9 +2045,44 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                           </div>
 
                           <div className="flex items-center gap-2 self-end sm:self-center">
+                            {/* Hidden 1-click file input for master PDF replacement */}
+                            <input
+                              type="file"
+                              id={`direct-pdf-${note.id}`}
+                              accept=".pdf,application/pdf"
+                              className="hidden"
+                              onChange={(e) => handleDirectPdfUpload(note, e)}
+                            />
+
+                            <button
+                              type="button"
+                              disabled={uploadingPdfNoteId === note.id}
+                              onClick={() => document.getElementById(`direct-pdf-${note.id}`)?.click()}
+                              className="p-2 rounded-lg text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 transition-colors text-xs font-semibold flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                              title="Upload or replace master PDF document directly from your device"
+                            >
+                              <Upload className="w-3.5 h-3.5" />
+                              <span className="hidden sm:inline">
+                                {uploadingPdfNoteId === note.id ? 'Uploading...' : 'Upload PDF'}
+                              </span>
+                            </button>
+
+                            <button
+                              onClick={() => handleOpenDriveModal(note)}
+                              className={`p-2 rounded-lg transition-colors text-xs font-semibold flex items-center gap-1 border cursor-pointer ${
+                                note.drive_url
+                                  ? 'text-blue-700 bg-blue-50 hover:bg-blue-100 border-blue-200'
+                                  : 'text-stone-600 bg-stone-100 hover:bg-stone-200 border-stone-200'
+                              }`}
+                              title={note.drive_url ? 'Google Drive link connected - click to view or update' : 'Attach Google Drive link for direct download'}
+                            >
+                              <ExternalLink className="w-3.5 h-3.5" />
+                              <span className="hidden sm:inline">{note.drive_url ? 'Drive Link' : 'Add Drive'}</span>
+                            </button>
+
                             <button
                               onClick={() => handleTogglePublish(note)}
-                              className="p-2 rounded-lg text-stone-600 hover:bg-stone-200 transition-colors text-xs font-semibold flex items-center gap-1"
+                              className="p-2 rounded-lg text-stone-600 hover:bg-stone-200 transition-colors text-xs font-semibold flex items-center gap-1 cursor-pointer"
                               title={note.published ? 'Hide from public store' : 'Publish to public store'}
                             >
                               {note.published ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
@@ -1950,7 +2091,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
 
                             <button
                               onClick={() => handleStartEdit(note)}
-                              className="p-2 rounded-lg text-[#5C715E] bg-[#F9F7F2] hover:bg-[#D9E4DD]/50 transition-colors text-xs font-semibold flex items-center gap-1 border border-[#5C715E]/20"
+                              className="p-2 rounded-lg text-[#5C715E] bg-[#F9F7F2] hover:bg-[#D9E4DD]/50 transition-colors text-xs font-semibold flex items-center gap-1 border border-[#5C715E]/20 cursor-pointer"
                               title="Edit note details or price"
                             >
                               <Edit2 className="w-4 h-4" />
@@ -2289,6 +2430,9 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                                       <span className="text-stone-300">•</span>
                                       <a
                                         href={`/api/download/${order.download_token}`}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        download
                                         className="text-[11px] font-bold text-stone-600 hover:text-stone-900 hover:underline"
                                       >
                                         Download File
@@ -2858,6 +3002,79 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
             </div>
           </div>
         )}
+
+        {/* Quick Google Drive Link Attachment Modal */}
+        {driveLinkModalNote && (
+          <div 
+            id="drive-link-modal"
+            className="fixed inset-0 z-[70] overflow-y-auto bg-stone-950/80 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-150"
+          >
+            <div className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl border border-stone-200 space-y-4 animate-in zoom-in-95 duration-150">
+              <div className="flex items-center gap-3">
+                <div className="w-12 h-12 rounded-2xl bg-blue-50 text-blue-600 flex items-center justify-center shrink-0 border border-blue-200">
+                  <ExternalLink className="w-6 h-6" />
+                </div>
+                <div>
+                  <h4 className="text-base sm:text-lg font-black text-[#2D3436]">Connect Original Notes File</h4>
+                  <p className="text-xs text-stone-500">Google Drive, Dropbox, or Cloud Storage Link</p>
+                </div>
+              </div>
+
+              <div className="p-3.5 bg-stone-50 rounded-2xl border border-stone-200 text-xs space-y-1">
+                <p className="font-bold text-[#2D3436] text-sm">{driveLinkModalNote.title}</p>
+                <p className="text-stone-500 text-[11px] leading-relaxed">
+                  Verified students who purchase this note will instantly download the complete, 100% full original PDF directly from your Google Drive link!
+                </p>
+              </div>
+
+              <div className="space-y-1.5">
+                <label htmlFor="quick-drive-input" className="text-xs font-bold text-stone-700 block">
+                  Shareable Google Drive Link:
+                </label>
+                <input
+                  id="quick-drive-input"
+                  type="url"
+                  placeholder="https://drive.google.com/file/d/.../view?usp=sharing"
+                  value={driveLinkInput}
+                  onChange={(e) => setDriveLinkInput(e.target.value)}
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-stone-300 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-[#5C715E] bg-white"
+                />
+                <p className="text-[11px] text-stone-500">
+                  Tip: In Google Drive, click <strong>Share → Anyone with the link can view</strong>, then copy and paste the link here.
+                </p>
+              </div>
+
+              {driveLinkError && (
+                <div className="p-3 bg-red-50 border border-red-200 text-red-700 text-xs rounded-xl flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4 shrink-0" />
+                  <span>{driveLinkError}</span>
+                </div>
+              )}
+
+              <div className="grid grid-cols-2 gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDriveLinkModalNote(null);
+                    setDriveLinkError(null);
+                  }}
+                  className="py-2.5 px-4 rounded-xl border border-stone-300 text-stone-700 hover:bg-stone-100 text-xs font-bold transition-colors cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={isSavingDriveLink}
+                  onClick={handleSaveQuickDriveLink}
+                  className="py-2.5 px-4 rounded-xl bg-[#5C715E] hover:bg-[#4A5D4E] text-white text-xs font-bold transition-colors shadow-xs flex items-center justify-center gap-1.5 disabled:opacity-50 cursor-pointer"
+                >
+                  {isSavingDriveLink ? 'Saving...' : 'Save Drive Link'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* In-App Note Deletion Confirmation Modal */}
         {noteToDelete && (
           <div 

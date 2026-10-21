@@ -28,6 +28,7 @@ import {
   restoreAllImagesFromFirestore,
   deleteImageFromFirestore,
 } from "./server/firebase";
+import { generateStudyGuidePdf, ensureAllNotesHavePdfs } from "./server/pdfGenerator";
 
 const app = express();
 
@@ -133,70 +134,101 @@ if (!fs.existsSync(SETTINGS_FILE)) {
   fs.writeFileSync(SETTINGS_FILE, JSON.stringify(defaultSettings, null, 2));
 }
 
-// Automatically sync notes with Firestore cloud database on boot (Two-way robust union merge)
+// Helper to normalize note titles for robust deduplication (e.g. "&" vs "and", case differences)
+function normalizeNoteTitle(t: string): string {
+  return (t || "")
+    .toLowerCase()
+    .replace(/&/g, "and")
+    .replace(/[^a-z0-9]/g, "");
+}
+
+// Automatically sync notes with Firestore cloud database on boot (Deduplicating & preventing phantom notes)
 if (isFirebaseConfigured()) {
   fetchAllNotesFromFirestore().then(async (fbNotes) => {
     try {
       const curNotes = readJSON<any[]>(NOTES_FILE, []);
       const noteMap = new Map<string, any>();
+      const titleToIdMap = new Map<string, string>();
 
-      // Load existing disk notes
+      // Load existing disk notes first (disk is authoritative for structure & current notes)
       for (const n of curNotes) {
-        if (n && n.id) noteMap.set(String(n.id), n);
+        if (n && n.id) {
+          const idStr = String(n.id);
+          noteMap.set(idStr, n);
+          const normTitle = normalizeNoteTitle(n.title);
+          if (normTitle) titleToIdMap.set(normTitle, idStr);
+        }
       }
 
-      // Union with Firestore cloud notes (cloud note is authoritative for images, previews, and links)
+      // Reconcile with Firestore cloud notes
       if (Array.isArray(fbNotes)) {
         for (const n of fbNotes) {
-          if (n && n.id) {
-            const existing = noteMap.get(String(n.id));
-            if (!existing) {
-              noteMap.set(String(n.id), n);
+          if (!n || !n.id) continue;
+          const idStr = String(n.id);
+          const normTitle = normalizeNoteTitle(n.title);
+          const matchingIdByTitle = normTitle ? titleToIdMap.get(normTitle) : null;
+
+          if (matchingIdByTitle && matchingIdByTitle !== idStr) {
+            // This is an obsolete duplicate in Firestore under an old ID - remove it from cloud
+            console.log(`[FIREBASE DEDUP] Cleaning obsolete cloud duplicate: "${n.title}" (${idStr})`);
+            deleteNoteFromFirestore(idStr).catch(() => {});
+            continue;
+          }
+
+          const existing = noteMap.get(idStr);
+          if (!existing) {
+            // Only accept new cloud notes if they have valid content and are not blank duplicates
+            if (n.title && (n.cover_image || n.preview_images?.length > 0 || n.pdf_file || n.drive_url)) {
+              noteMap.set(idStr, n);
+              if (normTitle) titleToIdMap.set(normTitle, idStr);
             } else {
-              // Always preserve images and drive links if present in Firestore
-              const cover_image = n.cover_image || existing.cover_image || "";
-              const preview_images = (Array.isArray(n.preview_images) && n.preview_images.length > 0)
-                ? n.preview_images
-                : (existing.preview_images || []);
-              const drive_url = n.drive_url || existing.drive_url || "";
-              const pdf_file = n.pdf_file || existing.pdf_file || "";
-
-              const curTime = new Date(existing.updated_at || existing.created_at || 0).getTime();
-              const fbTime = new Date(n.updated_at || n.created_at || 0).getTime();
-              const base = fbTime >= curTime ? n : existing;
-
-              noteMap.set(String(n.id), {
-                ...base,
-                cover_image,
-                preview_images,
-                drive_url,
-                pdf_file: pdf_file || base.pdf_file,
-              });
+              deleteNoteFromFirestore(idStr).catch(() => {});
             }
+          } else {
+            // Always preserve images and drive links if present in Firestore
+            const cover_image = n.cover_image || existing.cover_image || "";
+            const preview_images = (Array.isArray(n.preview_images) && n.preview_images.length > 0)
+              ? n.preview_images
+              : (existing.preview_images || []);
+            const drive_url = n.drive_url || existing.drive_url || "";
+            const pdf_file = n.pdf_file || existing.pdf_file || "";
+
+            const curTime = new Date(existing.updated_at || existing.created_at || 0).getTime();
+            const fbTime = new Date(n.updated_at || n.created_at || 0).getTime();
+            const base = fbTime >= curTime ? n : existing;
+
+            noteMap.set(idStr, {
+              ...base,
+              id: existing.id, // Preserve consistent local ID
+              cover_image,
+              preview_images,
+              drive_url,
+              pdf_file: pdf_file || base.pdf_file,
+            });
           }
         }
       }
 
       const mergedNotes = Array.from(noteMap.values());
       persistNotes(mergedNotes);
-      console.log(`[FIREBASE AUTO-SYNC] Synchronized ${mergedNotes.length} notes (Disk: ${curNotes.length}, Cloud: ${fbNotes?.length || 0}).`);
+      console.log(`[FIREBASE AUTO-SYNC] Synchronized ${mergedNotes.length} clean notes.`);
 
-      // Seed any notes from disk that might be missing in Firestore cloud
+      // Ensure active notes are synced to cloud
       for (const n of mergedNotes) {
         if (!fbNotes || !fbNotes.some((fn: any) => String(fn.id) === String(n.id))) {
           await saveNoteToFirestore(n);
         }
       }
+
+      // Restore all uploaded note images from Firestore cloud storage to local disk cache
+      restoreAllImagesFromFirestore(COVERS_DIR).catch((err) => {
+        console.error("[FIREBASE IMAGE RESTORE]", err?.message || err);
+      });
     } catch (err: any) {
       console.error("[FIREBASE MERGE ERROR]", err?.message || err);
     }
   }).catch((err) => {
     console.error("[FIREBASE SYNC]", err?.message || err);
-  });
-
-  // Restore all uploaded note images from Firestore cloud storage to local disk cache
-  restoreAllImagesFromFirestore(COVERS_DIR).catch((err) => {
-    console.error("[FIREBASE IMAGE RESTORE]", err?.message || err);
   });
 }
 
@@ -490,11 +522,24 @@ function requireAdmin(req: Request, res: Response, next: NextFunction) {
 }
 
 /**
+ * Converts any Google Drive link to a direct file download URL
+ */
+function formatGoogleDriveDownloadUrl(rawUrl: string): string {
+  if (!rawUrl) return "";
+  const trimmed = rawUrl.trim();
+  const fileIdMatch = trimmed.match(/\/file\/d\/([a-zA-Z0-9_-]+)/) || trimmed.match(/[?&]id=([a-zA-Z0-9_-]+)/);
+  if (fileIdMatch && fileIdMatch[1]) {
+    return `https://drive.google.com/uc?export=download&id=${fileIdMatch[1]}`;
+  }
+  return trimmed;
+}
+
+/**
  * Server-Side Verification Middleware:
  * Verifies transaction status against payment gateway webhooks or verified logs before serving any PDF content.
  * Guarantees that the 'I have paid' button or client tampering cannot bypass the payment flow.
  */
-function verifyPdfAccessMiddleware(req: Request, res: Response, next: NextFunction) {
+async function verifyPdfAccessMiddleware(req: Request, res: Response, next: NextFunction) {
   const { token } = req.params;
 
   if (!token || typeof token !== "string" || !token.startsWith("dl_")) {
@@ -683,9 +728,10 @@ function verifyPdfAccessMiddleware(req: Request, res: Response, next: NextFuncti
   }
 
   const filePath = note.pdf_file ? path.join(PRIVATE_PDFS_DIR, note.pdf_file) : "";
-  const hasLocalFile = filePath && fs.existsSync(filePath);
+  const hasLocalFile = !!(filePath && fs.existsSync(filePath));
 
-  if (!hasLocalFile && note.drive_url) {
+  // 1. If Google Drive or Cloud Link is configured, ALWAYS deliver the author's real full document
+  if (note.drive_url && typeof note.drive_url === "string" && note.drive_url.trim()) {
     (req as any).verifiedOrder = order;
     (req as any).verifiedNote = note;
     (req as any).verifiedLog = matchingLog;
@@ -693,18 +739,60 @@ function verifyPdfAccessMiddleware(req: Request, res: Response, next: NextFuncti
     return next();
   }
 
-  if (!hasLocalFile) {
-    return res.status(404).send("File not found on storage. Please contact the creator.");
+  // 2. If a local PDF file was uploaded to server storage, deliver the real file
+  if (hasLocalFile) {
+    (req as any).verifiedOrder = order;
+    (req as any).verifiedNote = note;
+    (req as any).verifiedLog = matchingLog;
+    (req as any).pdfFilePath = filePath;
+    (req as any).pdfFilename = note.pdf_original_name || `${note.title.replace(/[^a-zA-Z0-9_-]/g, "_")}.pdf`;
+    return next();
   }
 
-  // Attach verified references for route handlers
-  (req as any).verifiedOrder = order;
-  (req as any).verifiedNote = note;
-  (req as any).verifiedLog = matchingLog;
-  (req as any).pdfFilePath = filePath;
-  (req as any).pdfFilename = note.pdf_original_name || `${note.title.replace(/[^a-zA-Z0-9_-]/g, "_")}.pdf`;
-
-  next();
+  // 3. If file is awaiting upload from creator, render verified purchase support page
+  const acceptsHtml = req.headers.accept?.includes("text/html");
+  if (acceptsHtml) {
+    return res.status(200).send(`
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="UTF-8"><title>Order Verified - MEDICOS MINDS</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>
+          body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #faf9f6; color: #2d3436; padding: 40px 20px; text-align: center; }
+          .card { max-width: 520px; margin: 0 auto; background: white; border: 1px solid #e2e8f0; border-radius: 20px; padding: 36px; box-shadow: 0 10px 25px rgba(0,0,0,0.05); }
+          .icon { width: 56px; height: 56px; background: #d9e4dd; color: #5c715e; border-radius: 50%; display: flex; align-items: center; justify-content: center; margin: 0 auto 16px; font-size: 24px; font-weight: bold; }
+          h2 { color: #2d3436; margin: 0 0 10px; font-size: 20px; }
+          p { font-size: 14px; line-height: 1.6; color: #4b5563; margin-bottom: 12px; }
+          .badge { display: inline-block; background: #ecfdf5; color: #047857; font-weight: bold; font-size: 12px; padding: 4px 12px; border-radius: 9999px; margin-bottom: 14px; border: 1px solid #a7f3d0; }
+          .contact-box { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 12px; padding: 16px; margin: 20px 0; text-align: left; font-size: 13px; }
+          .btn { display: inline-block; margin-top: 10px; padding: 12px 24px; background: #5c715e; color: white; text-decoration: none; border-radius: 12px; font-weight: bold; }
+        </style>
+      </head>
+      <body>
+        <div class="card">
+          <div class="icon">✓</div>
+          <span class="badge">Payment Confirmed & Verified</span>
+          <h2>${note.title}</h2>
+          <p>Your purchase (Order <strong>#${order.id}</strong>) is confirmed! The author is syncing the original high-resolution master file.</p>
+          <div class="contact-box">
+            <strong>Instant Delivery Helpline:</strong><br>
+            Please send your Order ID (<strong>#${order.id}</strong>) to receive your notes on WhatsApp or Instagram immediately:<br><br>
+            • WhatsApp: <a href="https://wa.me/918340749923?text=Hi%20Dr.%20Kamran%2C%20I%20purchased%20${encodeURIComponent(note.title)}%20Order%20${order.id}">+91 83407 49923</a><br>
+            • Instagram: <a href="https://instagram.com/restore_healthphysio">@restore_healthphysio</a><br>
+            • Email: <a href="mailto:restorehealthphysio@gmail.com">restorehealthphysio@gmail.com</a>
+          </div>
+          <a href="/?order_id=${order.id}" class="btn">Return to Store</a>
+        </div>
+      </body>
+      </html>
+    `);
+  }
+  return res.status(202).json({
+    message: "Payment verified. Master PDF file is synchronizing with the creator. Please contact WhatsApp helpline or check back in My Purchases.",
+    order_id: order.id,
+    note_title: note.title
+  });
 }
 
 // ----------------------------------------------------
@@ -1720,7 +1808,8 @@ app.get("/api/download/:token", verifyPdfAccessMiddleware, (req, res) => {
   }
 
   if (isDrive && note?.drive_url) {
-    return res.redirect(note.drive_url);
+    const directUrl = formatGoogleDriveDownloadUrl(note.drive_url);
+    return res.redirect(directUrl);
   }
 
   // Stream PDF with HTTP Range and Content-Length support
@@ -2538,6 +2627,86 @@ app.put(
     } catch (err: any) {
       console.error("Error updating note:", err);
       res.status(500).json({ error: err.message || "Failed to update note" });
+    }
+  }
+);
+
+// Admin: Quick update Google Drive / Cloud Link for a note
+app.put("/api/admin/notes/:id/drive-url", requireAdmin, async (req: any, res: any) => {
+  try {
+    const { id } = req.params;
+    const { drive_url } = req.body;
+    const notes = readJSON<any[]>(NOTES_FILE, []);
+    const index = notes.findIndex((n) => String(n.id).trim() === String(id).trim());
+
+    if (index === -1) {
+      return res.status(404).json({ error: "Note not found" });
+    }
+
+    const cleanUrl = (drive_url || "").toString().trim();
+    notes[index].drive_url = cleanUrl;
+    notes[index].updated_at = new Date().toISOString();
+    persistNotes(notes);
+
+    try {
+      await saveNoteToFirestore(notes[index]);
+    } catch (e: any) {
+      console.error("[FIRESTORE DRIVE LINK SYNC ERROR]:", e?.message || e);
+    }
+
+    console.log(`[ADMIN] Updated Google Drive link for "${notes[index].title}": ${cleanUrl || "(removed)"}`);
+    res.json({ success: true, note: notes[index] });
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || "Failed to update drive link" });
+  }
+});
+
+// Admin: Quick upload or replace original PDF file for an existing note
+app.post(
+  "/api/admin/notes/:id/upload-pdf",
+  requireAdmin,
+  upload.single("pdf"),
+  async (req: any, res: any) => {
+    try {
+      const { id } = req.params;
+      const notes = readJSON<any[]>(NOTES_FILE, []);
+      const index = notes.findIndex((n) => String(n.id).trim() === String(id).trim());
+
+      if (index === -1) {
+        return res.status(404).json({ error: "Note not found" });
+      }
+
+      const file = req.file;
+      if (!file) {
+        return res.status(400).json({ error: "No PDF file provided." });
+      }
+
+      // Delete old file if existing and different
+      if (notes[index].pdf_file && notes[index].pdf_file !== file.filename) {
+        const oldPath = path.join(PRIVATE_PDFS_DIR, notes[index].pdf_file);
+        if (fs.existsSync(oldPath)) {
+          try {
+            fs.unlinkSync(oldPath);
+          } catch (e) {}
+        }
+      }
+
+      notes[index].pdf_file = file.filename;
+      notes[index].pdf_original_name = file.originalname;
+      notes[index].pdf_size = file.size;
+      notes[index].updated_at = new Date().toISOString();
+      persistNotes(notes);
+
+      try {
+        await saveNoteToFirestore(notes[index]);
+      } catch (e: any) {
+        console.error("[FIRESTORE PDF UPLOAD SYNC ERROR]:", e?.message || e);
+      }
+
+      console.log(`[ADMIN] Uploaded new master PDF for "${notes[index].title}": ${file.originalname} (${(file.size / 1024 / 1024).toFixed(2)} MB)`);
+      res.json({ success: true, note: notes[index] });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Failed to upload PDF file" });
     }
   }
 );

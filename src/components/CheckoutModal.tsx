@@ -663,10 +663,19 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ note, onClose, ini
     setTimeout(() => setCopiedLink(false), 2500);
   };
 
-  // Direct download trigger
+  // Direct download trigger (safe for iframes and cloud storage redirects)
   const handleDownload = () => {
     if (!downloadToken) return;
-    window.location.href = `/api/download/${downloadToken}`;
+    const a = document.createElement('a');
+    a.href = `/api/download/${downloadToken}`;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    a.download = `${(note?.title || 'Notes').replace(/[^a-zA-Z0-9_-]/g, '_')}.pdf`;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => {
+      if (document.body.contains(a)) document.body.removeChild(a);
+    }, 100);
   };
 
   if (!note) return null;
@@ -1338,14 +1347,17 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ note, onClose, ini
 
               {/* Core Delivery Actions: 1) Download PDF, 2) Read Online In-Browser */}
               <div className="space-y-2 pt-1">
-                <button
+                <a
                   id="download-pdf-btn"
-                  onClick={handleDownload}
+                  href={`/api/download/${downloadToken}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  download
                   className="w-full inline-flex items-center justify-center gap-2 py-3.5 px-5 bg-[#5C715E] hover:bg-[#4A5D4E] text-white rounded-xl font-black text-sm shadow-lg shadow-[#5C715E]/25 transition-all active:scale-98"
                 >
                   <Download className="w-4 h-4" />
-                  <span>DOWNLOAD PDF NOW</span>
-                </button>
+                  <span>DOWNLOAD ORIGINAL PDF NOW</span>
+                </a>
 
                 <a
                   id="read-online-btn"

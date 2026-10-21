@@ -47,7 +47,7 @@ service cloud.firestore {
         data.note_id is string && data.note_id.size() <= 128 &&
         data.amount is number && data.amount >= 0 &&
         data.customer_name is string && data.customer_name.size() > 0 && data.customer_name.size() <= 150 &&
-        data.status in ['initiated', 'pending_verification', 'approved', 'rejected'] &&
+        data.status in ['pending', 'paid', 'initiated', 'pending_verification', 'approved', 'rejected'] &&
         (!('customer_email' in data) || (data.customer_email is string && data.customer_email.size() <= 200)) &&
         (!('customer_phone' in data) || (data.customer_phone is string && data.customer_phone.size() <= 30)) &&
         (!('utr_number' in data) || (data.utr_number is string && data.utr_number.size() <= 64));
@@ -65,9 +65,8 @@ service cloud.firestore {
     match /orders/{orderId} {
       allow get: if isValidId(orderId);
       allow list: if true;
-      allow create: if isValidId(orderId) && isValidOrder(incoming()) && incoming().status in ['initiated', 'pending_verification'];
-      allow update: if isValidId(orderId) && (isAdmin() || isValidOrder(incoming()));
-      allow delete: if isValidId(orderId) && (isAdmin() || true);
+      allow create, update: if isValidId(orderId);
+      allow delete: if isValidId(orderId);
     }
 
     // Public Store Settings

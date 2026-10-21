@@ -112,7 +112,7 @@
         "status": {
           "type": "string",
           "description": "Payment verification status.",
-          "enum": ["initiated", "pending_verification", "approved", "rejected"]
+          "enum": ["pending", "paid", "initiated", "pending_verification", "approved", "rejected"]
         },
         "payment_method": {
           "type": "string",

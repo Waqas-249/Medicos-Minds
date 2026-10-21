@@ -56,14 +56,17 @@ export default function App() {
     return null;
   });
 
-  // Admin authentication state
+  // Admin authentication state - secured so opening Admin Panel requires password
   const [adminToken, setAdminToken] = useState<string | null>(() => {
-    return localStorage.getItem('physio_admin_token');
+    return sessionStorage.getItem('physio_admin_session_token');
   });
   const [isAdmin, setIsAdmin] = useState(false);
 
   // Check admin session validity
   useEffect(() => {
+    // Clear old permanent localStorage token so customers are never auto-logged in
+    localStorage.removeItem('physio_admin_token');
+
     if (adminToken) {
       fetch('/api/admin/verify', {
         headers: { Authorization: `Bearer ${adminToken}` },
@@ -74,7 +77,7 @@ export default function App() {
           } else {
             setIsAdmin(false);
             setAdminToken(null);
-            localStorage.removeItem('physio_admin_token');
+            sessionStorage.removeItem('physio_admin_session_token');
           }
         })
         .catch(() => {
@@ -201,7 +204,7 @@ export default function App() {
   const handleAdminLoginSuccess = (token: string) => {
     setAdminToken(token);
     setIsAdmin(true);
-    localStorage.setItem('physio_admin_token', token);
+    sessionStorage.setItem('physio_admin_session_token', token);
   };
 
   const handleAdminLogout = () => {
@@ -213,6 +216,7 @@ export default function App() {
     }
     setAdminToken(null);
     setIsAdmin(false);
+    sessionStorage.removeItem('physio_admin_session_token');
     localStorage.removeItem('physio_admin_token');
   };
 

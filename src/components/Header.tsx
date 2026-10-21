@@ -118,7 +118,7 @@ export const Header: React.FC<HeaderProps> = ({
             ) : (
               <>
                 <Lock className="w-3.5 h-3.5 text-stone-500" />
-                <span>Creator Login</span>
+                <span>Admin Panel</span>
               </>
             )}
           </button>
